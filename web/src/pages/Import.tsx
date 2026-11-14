@@ -1,4 +1,4 @@
-// Imports a bank or card statement file: OFX, QFX, QBO or CSV.
+// Imports a bank or card statement file: OFX, QFX, QBO or CSV, or PayPal statement PDFs.
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { ImportHistory } from './ImportHistory';
@@ -25,7 +25,41 @@ interface Mapping {
   dateOrder: 'mdy' | 'dmy' | 'ymd';
 }
 
+interface PaypalInspect {
+  type: 'paypal';
+  statements: {
+    fileName: string;
+    periodStart: string | null;
+    periodEnd: string | null;
+    beginning: number | null;
+    ending: number | null;
+    balanced: boolean;
+    count: number;
+    skipped: { posted: string; description: string; reason: string }[];
+  }[];
+  count: number;
+  firstDate: string | null;
+  lastDate: string | null;
+  balance: number | null;
+  accountId: number | null;
+  preview: { posted: string; amount: number; description: string }[];
+}
+
+type Pdf = { fileName: string; data: string };
+type ChosenFile = { name: string; content: string; pdfs?: Pdf[] };
+
+const isPdf = (f: File) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+// A file's bytes as base64, for sending a PDF in JSON.
+async function base64(f: File) {
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  let text = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+const monthOf = (iso: string | null) => (iso ? new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: 'short', year: 'numeric' }) : '?');
+
 type Inspect =
+  | PaypalInspect
   | {
       type: 'ofx';
       statements: { index: number; last4: string | null; kind: Account['kind']; currency: string; count: number; firstDate: string | null; lastDate: string | null; balance: number | null; accountId: number | null }[];
@@ -66,7 +100,7 @@ const NEW = 'new';
 
 export function Import() {
   const accounts = useApi<{ accounts: Account[] }>('/api/bank/accounts');
-  const [file, setFile] = useState<{ name: string; content: string } | null>(null);
+  const [file, setFile] = useState<ChosenFile | null>(null);
   const [inspect, setInspect] = useState<Inspect | null>(null);
   const [mapping, setMapping] = useState<Mapping | null>(null);
   const [statement, setStatement] = useState(0);
@@ -79,20 +113,33 @@ export function Import() {
   const [error, setError] = useState('');
   const input = useRef<HTMLInputElement>(null);
 
-  async function choose(chosen: File | undefined) {
+  async function choose(list: FileList | null | undefined) {
     setError('');
     setInspect(null);
     setPreview(null);
     setDone(null);
-    if (!chosen) return;
-    if (chosen.size > MAX_BYTES) return setError('That file is larger than 15 MB. Export a shorter date range.');
-    const content = await chosen.text();
-    setFile({ name: chosen.name, content });
+    const all = [...(list ?? [])];
+    if (!all.length) return;
+    // PDFs are PayPal statements, and several months can come in at once.
+    const pdfs = all.filter(isPdf);
+    const chosen = all[0];
+    if (!pdfs.length && all.length > 1) return setError('Choose one statement file at a time (several PayPal PDFs can go together).');
+    if (pdfs.length && pdfs.length < all.length) return setError('Choose either PayPal PDFs or one other statement file, not both.');
+    if (all.some((f) => f.size > MAX_BYTES)) return setError('That file is larger than 15 MB. Export a shorter date range.');
+    let next: ChosenFile;
+    if (pdfs.length) {
+      const read = await Promise.all(pdfs.map(async (f) => ({ fileName: f.name, data: await base64(f) })));
+      next = { name: pdfs.length === 1 ? pdfs[0].name : `${pdfs.length} PayPal statements`, content: '', pdfs: read };
+    } else next = { name: chosen.name, content: await chosen.text() };
+    setFile(next);
     setBusy(true);
     try {
-      const result = await post<Inspect>('/api/bank/import/inspect', { fileName: chosen.name, content });
+      const result = await post<Inspect>('/api/bank/import/inspect', next.pdfs ? { pdfs: next.pdfs } : { fileName: next.name, content: next.content });
       setInspect(result);
-      if (result.type === 'csv') {
+      if (result.type === 'paypal') {
+        setAccountChoice(result.accountId ? String(result.accountId) : '');
+        setNewAccount((a) => ({ ...a, kind: 'other', name: a.name || 'PayPal' }));
+      } else if (result.type === 'csv') {
         setMapping(result.mapping);
         setAccountChoice(result.accountId ? String(result.accountId) : '');
       } else {
@@ -124,10 +171,9 @@ export function Import() {
 
   const ready = Boolean(file && inspect && (accountChoice === NEW ? newAccount.name.trim() : accountChoice));
   const body = () => ({
-    fileName: file!.name,
-    content: file!.content,
+    ...(file!.pdfs ? { pdfs: file!.pdfs } : { fileName: file!.name, content: file!.content }),
     ...(accountChoice === NEW ? { newAccount: { ...newAccount, name: newAccount.name.trim() } } : { accountId: Number(accountChoice) }),
-    ...(inspect?.type === 'csv' ? { mapping } : { statement }),
+    ...(inspect?.type === 'csv' ? { mapping } : inspect?.type === 'ofx' ? { statement } : {}),
   });
 
   async function run(dryRun: boolean) {
@@ -152,7 +198,7 @@ export function Import() {
 
   return (
     <>
-      <PageHeader title="Import a statement" description="Bring in transactions from a file your bank or card lets you download: OFX, QFX, QBO or CSV. Anything already here is recognised and not added twice. Store orders come from the Chrome extension (below)." />
+      <PageHeader title="Import a statement" description="Bring in transactions from a file your bank or card lets you download: OFX, QFX, QBO or CSV, or PayPal's monthly statement PDFs. Anything already here is recognised and not added twice. Store orders come from the Chrome extension (below)." />
       {flash && !done && <Banner tone="info">{flash}</Banner>}
       {error && <Banner>{error}</Banner>}
       {done && (
@@ -202,8 +248,8 @@ export function Import() {
         <label className="flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-slate-300 px-4 py-8 text-center text-sm hover:border-emerald-500 dark:border-slate-700">
           <FileUp className="size-8 text-slate-400" aria-hidden />
           <span className="font-medium">{file ? file.name : 'Choose a statement file'}</span>
-          <span className="text-xs text-slate-500 dark:text-slate-400">.ofx, .qfx, .qbo or .csv, up to 15 MB. Read on your server only.</span>
-          <input ref={input} type="file" accept=".ofx,.qfx,.qbo,.csv,.txt,text/csv,application/x-ofx" className="sr-only" onChange={(e) => choose(e.target.files?.[0])} />
+          <span className="text-xs text-slate-500 dark:text-slate-400">.ofx, .qfx, .qbo or .csv, or PayPal statement PDFs (several months at once), up to 15 MB each. Read on your server only.</span>
+          <input ref={input} type="file" multiple accept=".ofx,.qfx,.qbo,.csv,.txt,.pdf,text/csv,application/x-ofx,application/pdf" className="sr-only" onChange={(e) => choose(e.target.files)} />
         </label>
       </Card>
 
@@ -239,6 +285,8 @@ export function Import() {
           })()}
         </Card>
       )}
+
+      {inspect?.type === 'paypal' && <PaypalSummary inspect={inspect} />}
 
       {inspect?.type === 'csv' && mapping && <CsvMapper inspect={inspect} mapping={mapping} onChange={setMapping} />}
 
@@ -434,6 +482,72 @@ function CsvMapper({ inspect, mapping, onChange }: { inspect: Extract<Inspect, {
           {plural(inspect.skippedCount, 'row')} can't be read and will be left out
           {inspect.skipped.length ? `, for example row ${inspect.skipped[0].row}: ${inspect.skipped[0].reason}` : ''}.
         </Banner>
+      )}
+    </Card>
+  );
+}
+
+// What the PayPal statements hold. Only money in and out of the PayPal balance comes in:
+// payments PayPal took from a card or bank are already in that account's transactions.
+function PaypalSummary({ inspect }: { inspect: PaypalInspect }) {
+  const off = inspect.statements.filter((s) => !s.balanced);
+  const skipped = inspect.statements.flatMap((s) => s.skipped);
+  return (
+    <Card title="2. What's in it" className="mb-5">
+      <p className="text-sm">
+        {plural(inspect.count, 'transaction')} that moved money in or out of your PayPal balance
+        {inspect.firstDate ? ` from ${inspect.firstDate} to ${inspect.lastDate}` : ''}
+        {inspect.balance !== null ? `, ending with ${money(inspect.balance)} in PayPal` : ''}.{inspect.accountId ? ' This PayPal account was recognised from an earlier import.' : ''}
+      </p>
+      <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+        Payments PayPal took straight from a card or bank account are left out: they are already in that card's or bank's transactions. Money moved to your bank is matched as a transfer once that bank's transactions are here.
+      </p>
+      {off.length > 0 && (
+        <Banner>
+          {off.map((s) => monthOf(s.periodStart)).join(', ')}: the rows found don't add up to the change in PayPal's balance, so some may be missing. Check{' '}
+          {off.length === 1 ? 'that month' : 'those months'} after importing.
+        </Banner>
+      )}
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr>
+              <th className={TH}>Month</th>
+              <th className={cx(TH, 'text-right')}>Rows</th>
+              <th className={cx(TH, 'text-right')}>Start</th>
+              <th className={cx(TH, 'text-right')}>End</th>
+              <th className={TH}>Adds up</th>
+            </tr>
+          </thead>
+          <tbody>
+            {inspect.statements.map((s, i) => (
+              <tr key={i} className={TR}>
+                <td className={TD} title={s.fileName}>{monthOf(s.periodStart)}</td>
+                <td className={cx(TD, 'text-right tabular-nums')}>{s.count}</td>
+                <td className={cx(TD, 'text-right tabular-nums')}>{s.beginning === null ? '—' : money(s.beginning)}</td>
+                <td className={cx(TD, 'text-right tabular-nums')}>{s.ending === null ? '—' : money(s.ending)}</td>
+                <td className={cx(TD, s.balanced ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400')}>{s.balanced ? 'Yes' : 'No'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {skipped.length > 0 && (
+        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+          Left out: {skipped.map((s) => `${s.posted} ${s.description} (${s.reason.toLowerCase()})`).join('; ')}.
+        </p>
+      )}
+      {inspect.preview.length > 0 && (
+        <ul className="mt-3 space-y-1 text-sm text-slate-600 dark:text-slate-300">
+          {inspect.preview.map((p, i) => (
+            <li key={i} className="flex justify-between gap-3">
+              <span className="truncate">
+                {p.posted} · {p.description}
+              </span>
+              <Amount value={p.amount} />
+            </li>
+          ))}
+        </ul>
       )}
     </Card>
   );

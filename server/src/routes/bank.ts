@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { applyMapping, guessMapping, layoutSignature, readTable } from '../bank/csv';
 import type { CsvMapping } from '../bank/csv';
 import { looksLikeOfx, parseOfx, writeOfx } from '../bank/ofx';
+import { looksLikePdf, parsePaypalStatement } from '../bank/paypal';
+import type { PaypalStatement } from '../bank/paypal';
 import type { SimplefinService } from '../bank/simplefin';
 import { IMPORT_OUTCOMES } from '../bank/store';
 import type { BankStore, ImportOutcome, TxFilters } from '../bank/store';
@@ -91,10 +93,41 @@ const mappingSchema = z.object({
   dateOrder: z.enum(['mdy', 'dmy', 'ymd']),
 });
 
-const fileSchema = z.object({
-  fileName: z.string().max(260).optional().default(''),
-  content: z.string().min(1, 'The file is empty.').max(MAX_FILE_CHARS, 'The file is too large.'),
-});
+const fileSchema = z
+  .object({
+    fileName: z.string().max(260).optional().default(''),
+    content: z.string().max(MAX_FILE_CHARS, 'The file is too large.').optional().default(''),
+    // PDF statements (PayPal's), base64, one or several months at once.
+    pdfs: z
+      .array(z.object({ fileName: z.string().max(260).optional().default(''), data: z.string().min(1).max(MAX_FILE_CHARS, 'The file is too large.') }))
+      .max(24, 'Choose up to 24 statements at a time.')
+      .optional(),
+  })
+  .refine((f) => f.content.length > 0 || (f.pdfs?.length ?? 0) > 0, { message: 'The file is empty.' });
+
+// PayPal statements, read and put in date order. The same statement chosen twice, or
+// months that overlap, don't bring a row in twice.
+async function readPaypal(pdfs: { fileName: string; data: string }[]) {
+  const statements: (PaypalStatement & { fileName: string })[] = [];
+  for (const pdf of pdfs) {
+    const data = new Uint8Array(Buffer.from(pdf.data, 'base64'));
+    if (!looksLikePdf(data)) throw new HttpError(400, `${pdf.fileName || 'That file'} is not a PDF.`);
+    try {
+      statements.push({ ...(await parsePaypalStatement(data)), fileName: pdf.fileName });
+    } catch (err) {
+      throw new HttpError(400, `${pdf.fileName || 'That file'}: ${(err as Error).message}`);
+    }
+  }
+  statements.sort((a, b) => (a.periodStart ?? '').localeCompare(b.periodStart ?? ''));
+  const seen = new Set<string>();
+  const transactions = statements
+    .flatMap((s) => s.transactions)
+    .filter((t) => !t.externalId || (!seen.has(t.externalId) && Boolean(seen.add(t.externalId))))
+    .sort((a, b) => a.posted.localeCompare(b.posted));
+  const latest = statements[statements.length - 1];
+  const owner = statements.find((s) => s.accountId)?.accountId ?? null;
+  return { statements, transactions, latest, fileKey: owner ? `paypal:${owner.toLowerCase()}` : null };
+}
 
 const newAccountSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -268,7 +301,30 @@ export function bankRoutes(app: FastifyInstance, bank: BankStore, simplefin: Sim
 
   // What's in a file, before importing it.
   app.post('/api/bank/import/inspect', async (request) => {
-    const body = parse(fileSchema.extend({ mapping: mappingSchema.optional() }), request.body);
+    const body = parse(fileSchema.and(z.object({ mapping: mappingSchema.optional() })), request.body);
+    if (body.pdfs?.length) {
+      const paypal = await readPaypal(body.pdfs);
+      const dates = paypal.transactions.map((t) => t.posted);
+      return {
+        type: 'paypal',
+        statements: paypal.statements.map((s) => ({
+          fileName: s.fileName,
+          periodStart: s.periodStart,
+          periodEnd: s.periodEnd,
+          beginning: s.beginning,
+          ending: s.ending,
+          balanced: s.balanced,
+          count: s.transactions.length,
+          skipped: s.skipped,
+        })),
+        count: paypal.transactions.length,
+        firstDate: dates[0] || null,
+        lastDate: dates[dates.length - 1] || null,
+        balance: paypal.latest?.ending ?? null,
+        accountId: paypal.fileKey ? bank.accountForFileKey(bank.fileKey(paypal.fileKey)) : null,
+        preview: paypal.transactions.slice(0, 8),
+      };
+    }
     if (looksLikeOfx(body.content)) {
       let statements;
       try {
@@ -338,25 +394,33 @@ export function bankRoutes(app: FastifyInstance, bank: BankStore, simplefin: Sim
   // Imports a file into an account, or with dryRun, says what importing would do.
   app.post('/api/bank/import', async (request) => {
     const body = parse(
-      fileSchema.extend({
-        accountId: z.number().int().optional(),
-        newAccount: newAccountSchema.optional(),
-        mapping: mappingSchema.optional(),
-        statement: z.number().int().min(0).optional(),
-        dryRun: z.boolean().optional(),
-      }),
+      fileSchema.and(
+        z.object({
+          accountId: z.number().int().optional(),
+          newAccount: newAccountSchema.optional(),
+          mapping: mappingSchema.optional(),
+          statement: z.number().int().min(0).optional(),
+          dryRun: z.boolean().optional(),
+        })
+      ),
       request.body
     );
     if (!body.accountId && !body.newAccount) throw new HttpError(400, 'Choose an account, or name a new one.');
 
-    let source: 'ofx' | 'csv';
+    let source: 'ofx' | 'csv' | 'paypal';
     let transactions;
+    const paypal = body.pdfs?.length ? await readPaypal(body.pdfs) : null;
     let accountNumber: string | null = null;
     let balance: { amount: number | null; date: string | null } | null = null;
     let last4: string | null = null;
     let layout: { signature: string; mapping: CsvMapping } | null = null;
     try {
-      if (looksLikeOfx(body.content)) {
+      if (paypal) {
+        source = 'paypal';
+        transactions = paypal.transactions;
+        accountNumber = paypal.fileKey;
+        if (paypal.latest) balance = { amount: paypal.latest.ending, date: paypal.latest.periodEnd };
+      } else if (looksLikeOfx(body.content)) {
         const statements = parseOfx(body.content);
         const statement = statements[body.statement ?? 0];
         if (!statement) throw new Error('That statement is not in the file.');
@@ -387,7 +451,7 @@ export function bankRoutes(app: FastifyInstance, bank: BankStore, simplefin: Sim
     try {
       const summary = bank.importTransactions(accountId as number, source, transactions, {
         dryRun: body.dryRun,
-        fileName: body.fileName || null,
+        fileName: body.fileName || (body.pdfs?.length ? body.pdfs.map((p) => p.fileName).join(', ').slice(0, 260) : null),
         username: user(request),
         fileKey: accountNumber ? bank.fileKey(accountNumber) : null,
         layout: layout?.signature ?? null,
@@ -400,7 +464,7 @@ export function bankRoutes(app: FastifyInstance, bank: BankStore, simplefin: Sim
           const before = bank.csvLayout(layout.signature) as { accountIds?: number[] } | null;
           bank.saveCsvLayout(layout.signature, { ...layout.mapping, accountId, accountIds: [...new Set([...(before?.accountIds || []), accountId as number])] });
         }
-        audit(request, 'bank.import', { accountId, source, fileName: body.fileName, ...summary, examples: undefined });
+        audit(request, 'bank.import', { accountId, source, fileName: body.fileName || body.pdfs?.map((p) => p.fileName).join(', '), ...summary, examples: undefined });
       }
       return { ...summary, accountId: temporary ? null : accountId };
     } finally {
