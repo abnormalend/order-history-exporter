@@ -133,6 +133,7 @@ export function YearEnd({ meta, forms }: { meta: Meta | null; forms: Forms }) {
 
           <CapitalCard data={d} onChange={data.reload} />
           <AssetsCard data={d} entities={entities} onChange={data.reload} />
+          <FiledReturns year={year} entity={entity} />
         </>
       )}
     </>
@@ -428,5 +429,78 @@ function AssetsCard({ data, entities, onChange }: { data: YearSummary; entities:
         Depreciation isn't calculated here; the register gives your preparer what they need to do it.
       </p>
     </Card>
+  );
+}
+
+interface FiledReturn {
+  entityId: number;
+  entity: string;
+  form: string | null;
+  lines: { id: number; section: string; line: string; reported: number; worksheet: number | null; categories: string[]; hub: number | null; note: string | null }[];
+}
+
+// What each business reported on its return for the year, beside Business Hub's figure
+// for the same categories, so a missed deduction or a slip stands out.
+function FiledReturns({ year, entity }: { year: string; entity: string }) {
+  const data = useApi<{ returns: FiledReturn[] }>(`/api/returns?year=${year}`);
+  const returns = (data.data?.returns ?? []).filter((r) => !entity || String(r.entityId) === entity);
+  if (!returns.length) return null;
+  const amount = (n: number | null) => (n === null ? '—' : money(Math.abs(n)));
+  return (
+    <>
+      {returns.map((r) => {
+        const sections = [...new Set(r.lines.map((l) => l.section))];
+        return (
+          <Card key={r.entityId} title={`${r.entity} · tax return as filed for ${year}${r.form ? ` (${r.form})` : ''}`} className="mb-5" padded={false}>
+            <p className="px-4 pt-3 text-sm text-slate-600 dark:text-slate-300">
+              What was reported, what your own worksheet showed at the time, and what Business Hub has now for the same categories.
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr>
+                    <th className={TH}>Line</th>
+                    <th className={cx(TH, 'text-right')}>Reported</th>
+                    <th className={cx(TH, 'text-right')}>Your worksheet</th>
+                    <th className={cx(TH, 'text-right')}>Business Hub</th>
+                    <th className={cx(TH, 'text-right')}>Not reported</th>
+                  </tr>
+                </thead>
+                {sections.map((section) => (
+                  <tbody key={section}>
+                    <tr className={TR}>
+                      <td colSpan={5} className={cx(TD, 'bg-slate-50 text-xs font-medium tracking-wide text-slate-500 uppercase dark:bg-slate-800/50 dark:text-slate-400')}>
+                        {section}
+                      </td>
+                    </tr>
+                    {r.lines
+                      .filter((l) => l.section === section)
+                      .map((l) => {
+                        const actual = l.hub ?? l.worksheet;
+                        const gap = actual === null ? null : Math.round((Math.abs(actual) - Math.abs(l.reported)) * 100) / 100;
+                        return (
+                          <tr key={l.id} className={TR}>
+                            <td className={TD}>
+                              {l.line}
+                              {l.note && <div className="text-xs text-slate-500 dark:text-slate-400">{l.note}</div>}
+                              {l.categories.length > 0 && <div className="text-xs text-slate-500 dark:text-slate-400">Business Hub: {l.categories.join(', ')}</div>}
+                            </td>
+                            <td className={cx(TD, 'text-right tabular-nums')}>{amount(l.reported)}</td>
+                            <td className={cx(TD, 'text-right tabular-nums')}>{amount(l.worksheet)}</td>
+                            <td className={cx(TD, 'text-right tabular-nums')}>{amount(l.hub)}</td>
+                            <td className={cx(TD, 'text-right tabular-nums', gap !== null && Math.abs(gap) >= 1 && (gap > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-slate-500'))}>
+                              {gap === null || Math.abs(gap) < 1 ? '—' : `${gap > 0 ? '' : '−'}${money(Math.abs(gap))}`}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                ))}
+              </table>
+            </div>
+          </Card>
+        );
+      })}
+    </>
   );
 }

@@ -12,7 +12,7 @@ export interface Meta {
   payments: string[];
   zips: string[];
   // Businesses and properties that spending is assigned to.
-  entities: { id: number; name: string; kind: 'business' | 'rental' | 'other'; activity: string; taxForm: string; invested: number | null; investedOn: string | null }[];
+  entities: { id: number; name: string; kind: 'business' | 'rental' | 'other'; activity: string; taxForm: string; invested: number | null; investedOn: string | null; closedOn: string | null }[];
   // Each ZIP's place name (its city, or a name you gave it).
   places: { zip: string; city: string | null; name: string | null; label: string; orders: number }[];
   years: string[];

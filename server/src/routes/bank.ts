@@ -316,6 +316,7 @@ export function bankRoutes(app: FastifyInstance, bank: BankStore, simplefin: Sim
           balanced: s.balanced,
           count: s.transactions.length,
           skipped: s.skipped,
+          paidElsewhere: s.paidElsewhere,
         })),
         count: paypal.transactions.length,
         firstDate: dates[0] || null,

@@ -45,6 +45,11 @@ export function correlationRoutes(app: FastifyInstance, correlate: CorrelationSe
       .regex(/^\d{4}-\d{2}-\d{2}$/, 'Dates look like 2025-10-02.')
       .nullable()
       .optional(),
+    closedOn: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Dates look like 2025-10-02.')
+      .nullable()
+      .optional(),
   });
 
   app.get('/api/entities', async () => ({ entities: correlate.entities() }));

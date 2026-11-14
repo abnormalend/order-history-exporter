@@ -208,3 +208,54 @@ test('cash flow: income, spending by group, loan principal, net worth and cash-o
   const worth = (await get(`/api/pl/cashflow?entity=${birch}`)).netWorth;
   assert.deepEqual([worth.value, worth.debt, worth.total], [250000, 0, 250000 + worth.cash]);
 });
+
+test('a closed business keeps its history and is listed last', async () => {
+  const shut = (await post('/api/entities', { name: 'Aspen Realty Inc', kind: 'business', taxForm: 'form-1065', closedOn: '2025-06-30' })).id;
+  const { entities } = await get('/api/entities');
+  assert.equal(entities.find((e) => e.id === shut).closedOn, '2025-06-30');
+  assert.equal(entities.at(-1).id, shut, 'closed businesses come after open ones');
+  assert.equal(entities.find((e) => e.id === str).closedOn, null);
+  // Saving other details leaves the closing date; clearing it reopens.
+  await post(`/api/entities/${shut}`, { name: 'Aspen Realty Inc', kind: 'business' });
+  assert.equal((await get('/api/entities')).entities.find((e) => e.id === shut).closedOn, '2025-06-30');
+  await post(`/api/entities/${shut}`, { name: 'Aspen Realty Inc', kind: 'business', closedOn: null });
+  assert.equal((await get('/api/entities')).entities.find((e) => e.id === shut).closedOn, null);
+  await assert.rejects(post(`/api/entities/${shut}`, { name: 'Aspen Realty Inc', kind: 'business', closedOn: 'June' }), /Dates look like/);
+});
+
+test('a tax return as filed sits beside Business Hub for the same categories', async () => {
+  const saved = await post('/api/returns', {
+    entityId: str,
+    year: '2026',
+    form: '1065',
+    lines: [
+      { section: 'Income', line: 'Gross rents', reported: 4800, categories: ['Rental Income'] },
+      { section: 'Deductions', line: 'Repairs', reported: 900, worksheet: -950, categories: ['Contractor Repairs', 'Building & Repair Materials'], note: 'Rounded on the return' },
+      { section: 'Deductions', line: 'Depreciation', reported: 12000 },
+    ],
+  });
+  const ret = saved.returns.find((r) => r.entityId === str);
+  assert.equal(ret.form, '1065');
+  assert.deepEqual(
+    ret.lines.map((l) => [l.line, l.reported, l.worksheet, Math.abs(l.hub ?? 0)]),
+    [
+      ['Gross rents', 4800, null, 5000],
+      ['Repairs', 900, -950, 1000],
+      ['Depreciation', 12000, null, 0],
+    ]
+  );
+  assert.equal(ret.lines[2].hub, null, 'a line with no categories has no Business Hub figure');
+  assert.equal(ret.lines[1].note, 'Rounded on the return');
+
+  // Saving again replaces the lines; other years and businesses are untouched.
+  await post('/api/returns', { entityId: ltr, year: '2026', lines: [{ section: 'Income', line: 'Gross rents', reported: 2000, categories: ['Rental Income'] }] });
+  await post('/api/returns', { entityId: str, year: '2026', form: '1065', lines: [{ section: 'Income', line: 'Gross rents', reported: 5000, categories: ['Rental Income'] }] });
+  const listed = await get('/api/returns?year=2026');
+  assert.deepEqual(listed.returns.map((r) => [r.entity, r.lines.length]), [['Lakeside Stays LLC', 1], ['Maple Rentals LLC', 1]]);
+  assert.equal(listed.returns[1].lines[0].hub, (await get(`/api/pl?period=2026&entity=${ltr}`)).revenue, 'its own rent, not the other business');
+  assert.deepEqual(listed.years, ['2026']);
+  assert.deepEqual((await get('/api/returns?year=2025')).returns, []);
+
+  await assert.rejects(post('/api/returns', { entityId: 9999, year: '2026', lines: [] }), /not found/);
+  await assert.rejects(post('/api/returns', { entityId: str, year: '26', lines: [] }), /A year looks like/);
+});

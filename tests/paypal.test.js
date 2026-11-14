@@ -165,6 +165,8 @@ test('PayPal statements bring in only what moved the PayPal balance', async () =
     ]
   );
   assert.deepEqual(seen.statements[1].skipped.map((s) => s.reason), ['Held in MXN, not dollars']);
+  // Paid with a card through PayPal: listed, not imported.
+  assert.deepEqual(seen.statements[0].paidElsewhere, [{ posted: '2026-06-14', description: 'Express Checkout Payment: Parts Shop, Inc', amount: -8.8, from: 'card' }]);
   assert.equal(seen.balance, 612.75);
   assert.equal(seen.accountId, null);
 
@@ -189,6 +191,28 @@ test('PayPal statements bring in only what moved the PayPal balance', async () =
   assert.equal((await post('/api/bank/import/inspect', { pdfs })).accountId, paypal.id);
   const again = await post('/api/bank/import', { pdfs, accountId: paypal.id });
   assert.deepEqual([again.added, again.skipped], [0, 5]);
+});
+
+test('a month when the PayPal balance was never used has nothing to import, and says why', async () => {
+  const data = await statement({
+    period: 'Mar 1, 2025 - Mar 31, 2025',
+    beginning: '0.00',
+    ending: '0.00',
+    account: [
+      // Paid from a bank account, in another currency.
+      ['03/02/2025 Mobile Payment: A Friend', 'EXAMPLE BANK, NA -', 'Checking x-0000 9.98', 'USD', '9.98 USD X 1.3345 (Exchange Rate) 13.32', 'CAD', 'ID: 3CC00000000000001', 'CAD -12.00 -1.32 -13.32'],
+      ['03/14/2025 Express Checkout Payment: Car Parts,', 'INC', 'ID: 3CC00000000000002', 'USD -4.80 0.00 -4.80'],
+      ['03/14/2025 General Credit Card Deposit', 'ID: 3CC00000000000003', 'Ref ID: 3CC00000000000002', 'USD 4.80 0.00 4.80'],
+    ],
+    balance: [],
+  });
+  const seen = await post('/api/bank/import/inspect', { pdfs: [{ fileName: 'statement-Mar-2025.pdf', data }] });
+  assert.equal(seen.count, 0);
+  assert.equal(seen.statements[0].balanced, true);
+  assert.deepEqual(seen.statements[0].paidElsewhere, [
+    { posted: '2025-03-02', description: 'Mobile Payment: A Friend', amount: -9.98, from: 'bank' },
+    { posted: '2025-03-14', description: 'Express Checkout Payment: Car Parts, INC', amount: -4.8, from: 'card' },
+  ]);
 });
 
 test('a PDF that is not a PayPal statement is turned away', async () => {

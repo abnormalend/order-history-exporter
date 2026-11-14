@@ -29,6 +29,8 @@ export interface EntityInput {
   taxForm?: string | null;
   invested?: number | null;
   investedOn?: string | null;
+  // The day it closed; its history stays.
+  closedOn?: string | null;
 }
 
 const now = () => new Date().toISOString();
@@ -87,7 +89,7 @@ export function correlationService({ db, bank }: { db: OrdersDb; bank: BankStore
   /* ---------- Entities ---------- */
 
   const entities = () =>
-    (raw.prepare('SELECT id, name, kind, activity, tax_form, invested, invested_on FROM entities ORDER BY name COLLATE NOCASE').all() as Row[]).map((r) => ({
+    (raw.prepare('SELECT id, name, kind, activity, tax_form, invested, invested_on, closed_on FROM entities ORDER BY closed_on IS NOT NULL, name COLLATE NOCASE').all() as Row[]).map((r) => ({
       id: r.id as number,
       name: r.name as string,
       kind: r.kind as string,
@@ -95,15 +97,16 @@ export function correlationService({ db, bank }: { db: OrdersDb; bank: BankStore
       taxForm: (r.tax_form as string | null) ?? (r.kind === 'rental' ? 'schedule-e' : 'schedule-c'),
       invested: (r.invested as number | null) ?? null,
       investedOn: (r.invested_on as string | null) ?? null,
+      closedOn: (r.closed_on as string | null) ?? null,
     }));
 
   // Fields left out keep what they were.
   function saveEntity(input: EntityInput) {
     const keep = <T,>(value: T | undefined, before: T | null) => (value === undefined ? before : value);
     if (input.id) {
-      const before = raw.prepare('SELECT activity, tax_form, invested, invested_on FROM entities WHERE id = ?').get(input.id) as Row;
+      const before = raw.prepare('SELECT activity, tax_form, invested, invested_on, closed_on FROM entities WHERE id = ?').get(input.id) as Row;
       raw
-        .prepare('UPDATE entities SET name = ?, kind = ?, activity = ?, tax_form = ?, invested = ?, invested_on = ? WHERE id = ?')
+        .prepare('UPDATE entities SET name = ?, kind = ?, activity = ?, tax_form = ?, invested = ?, invested_on = ?, closed_on = ? WHERE id = ?')
         .run(
           input.name,
           input.kind,
@@ -111,13 +114,14 @@ export function correlationService({ db, bank }: { db: OrdersDb; bank: BankStore
           keep(input.taxForm, before.tax_form) ?? null,
           keep(input.invested, before.invested) ?? null,
           keep(input.investedOn, before.invested_on) ?? null,
+          keep(input.closedOn, before.closed_on) ?? null,
           input.id
         );
       return input.id;
     }
     return Number(
       raw
-        .prepare('INSERT INTO entities (name, kind, activity, tax_form, invested, invested_on, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .prepare('INSERT INTO entities (name, kind, activity, tax_form, invested, invested_on, closed_on, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(
           input.name,
           input.kind,
@@ -125,6 +129,7 @@ export function correlationService({ db, bank }: { db: OrdersDb; bank: BankStore
           input.taxForm ?? (input.kind === 'rental' ? 'schedule-e' : 'schedule-c'),
           input.invested ?? null,
           input.investedOn ?? null,
+          input.closedOn ?? null,
           now()
         ).lastInsertRowid
     );

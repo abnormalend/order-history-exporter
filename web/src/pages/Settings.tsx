@@ -262,6 +262,7 @@ function EntitiesCard({ entities, onChange }: { entities: Meta['entities']; onCh
       taxForm: en.taxForm,
       invested: en.invested,
       investedOn: en.investedOn,
+      closedOn: en.closedOn,
       ...changes,
     });
   const units = properties.data?.options.properties ?? [];
@@ -275,7 +276,7 @@ function EntitiesCard({ entities, onChange }: { entities: Meta['entities']; onCh
       {entities.length > 0 && (
         <ul className="mb-4 divide-y divide-slate-100 text-sm dark:divide-slate-800">
           {entities.map((en) => (
-            <li key={en.id} className="grid grid-cols-2 items-end gap-2 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1.4fr)_8rem_9.5rem_auto]">
+            <li key={en.id} className="grid grid-cols-2 items-end gap-2 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1.4fr)_8rem_9.5rem_9.5rem_auto]">
               <Field label="Name" className="col-span-2 md:col-span-1">
                 <Input
                   defaultValue={en.name}
@@ -321,6 +322,9 @@ function EntitiesCard({ entities, onChange }: { entities: Meta['entities']; onCh
               </Field>
               <Field label="Invested on">
                 <Input type="date" defaultValue={en.investedOn ?? ''} onBlur={(e) => (e.target.value || null) !== en.investedOn && save(en, { investedOn: e.target.value || null })} />
+              </Field>
+              <Field label="Closed on" hint="Only if it has closed">
+                <Input type="date" defaultValue={en.closedOn ?? ''} onBlur={(e) => (e.target.value || null) !== en.closedOn && save(en, { closedOn: e.target.value || null })} />
               </Field>
               <Button variant="ghost" aria-label={`Remove ${en.name}`} onClick={() => setRemoving(en)}>
                 <Trash2 className="size-4" aria-hidden />

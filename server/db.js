@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 22;
+const SCHEMA_VERSION = 23;
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -583,6 +583,28 @@ const SCHEMA_V17 = `
 // into principal and interest in a split account.
 // Money the owner puts into the business, or takes out: transfers, not income or
 // spending, so choosing either category makes the transaction a transfer.
+// A business that has closed keeps its history, marked with the day it closed. And
+// what each business reported on its tax return, line by line, to compare with what
+// Business Hub has for the same year.
+const SCHEMA_V23 = `
+  ALTER TABLE entities ADD COLUMN closed_on TEXT;
+  CREATE TABLE tax_return_lines (
+    id INTEGER PRIMARY KEY,
+    entity_id INTEGER NOT NULL REFERENCES entities (id) ON DELETE CASCADE,
+    year TEXT NOT NULL,
+    form TEXT,
+    section TEXT NOT NULL,
+    line TEXT NOT NULL,
+    reported REAL NOT NULL,
+    worksheet REAL,
+    categories TEXT,
+    note TEXT,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX tax_return_lines_year ON tax_return_lines (year, entity_id);
+`;
+
 const SCHEMA_V22 = `
   INSERT OR IGNORE INTO categories (name, position) VALUES ('Owner Contribution', (SELECT COALESCE(MAX(position), 0) + 1 FROM categories));
   INSERT OR IGNORE INTO categories (name, position) VALUES ('Owner Withdrawal', (SELECT COALESCE(MAX(position), 0) + 1 FROM categories));
@@ -829,6 +851,7 @@ function migrate(db, file) {
     if (version < 20) db.exec(SCHEMA_V20);
     if (version < 21) db.exec(SCHEMA_V21);
     if (version < 22) db.exec(SCHEMA_V22);
+    if (version < 23) db.exec(SCHEMA_V23);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

@@ -36,6 +36,7 @@ interface PaypalInspect {
     balanced: boolean;
     count: number;
     skipped: { posted: string; description: string; reason: string }[];
+    paidElsewhere: { posted: string; description: string; amount: number | null; from: 'card' | 'bank' | 'other' }[];
   }[];
   count: number;
   firstDate: string | null;
@@ -290,7 +291,7 @@ export function Import() {
 
       {inspect?.type === 'csv' && mapping && <CsvMapper inspect={inspect} mapping={mapping} onChange={setMapping} />}
 
-      {inspect && (
+      {inspect && !(inspect.type === 'paypal' && inspect.count === 0) && (
         <Card title="3. Which account" className="mb-5">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Account">
@@ -344,7 +345,7 @@ export function Import() {
         </Card>
       )}
 
-      {inspect && (
+      {inspect && !(inspect.type === 'paypal' && inspect.count === 0) && (
         <Card title="4. Check, then import" className="mb-5">
           {preview && (
             <div className="mb-4 text-sm">
@@ -492,16 +493,32 @@ function CsvMapper({ inspect, mapping, onChange }: { inspect: Extract<Inspect, {
 function PaypalSummary({ inspect }: { inspect: PaypalInspect }) {
   const off = inspect.statements.filter((s) => !s.balanced);
   const skipped = inspect.statements.flatMap((s) => s.skipped);
+  const elsewhere = inspect.statements.flatMap((s) => s.paidElsewhere);
+  const FROM = { card: 'card', bank: 'bank', other: 'card or bank' };
   return (
     <Card title="2. What's in it" className="mb-5">
-      <p className="text-sm">
-        {plural(inspect.count, 'transaction')} that moved money in or out of your PayPal balance
-        {inspect.firstDate ? ` from ${inspect.firstDate} to ${inspect.lastDate}` : ''}
-        {inspect.balance !== null ? `, ending with ${money(inspect.balance)} in PayPal` : ''}.{inspect.accountId ? ' This PayPal account was recognised from an earlier import.' : ''}
-      </p>
-      <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-        Payments PayPal took straight from a card or bank account are left out: they are already in that card's or bank's transactions. Money moved to your bank is matched as a transfer once that bank's transactions are here.
-      </p>
+      {inspect.count === 0 ? (
+        <Banner tone="info">
+          Nothing to import: your PayPal balance wasn't used in {inspect.statements.length === 1 ? 'this month' : 'these months'}
+          {inspect.balance !== null ? ` (it stayed at ${money(inspect.balance)})` : ''}.
+          {elsewhere.length > 0
+            ? elsewhere.length === 1
+              ? " The payment below was paid from a card or bank account through PayPal, so it comes in with that card's or bank's transactions, not from here."
+              : ` All ${plural(elsewhere.length, 'payment')} below were paid from a card or bank account through PayPal, so they come in with that card's or bank's transactions, not from here.`
+            : ' There were no payments either.'}
+        </Banner>
+      ) : (
+        <>
+          <p className="text-sm">
+            {plural(inspect.count, 'transaction')} that moved money in or out of your PayPal balance
+            {inspect.firstDate ? ` from ${inspect.firstDate} to ${inspect.lastDate}` : ''}
+            {inspect.balance !== null ? `, ending with ${money(inspect.balance)} in PayPal` : ''}.{inspect.accountId ? ' This PayPal account was recognised from an earlier import.' : ''}
+          </p>
+          <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+            Payments PayPal took straight from a card or bank account are left out: they are already in that card's or bank's transactions. Money moved to your bank is matched as a transfer once that bank's transactions are here.
+          </p>
+        </>
+      )}
       {off.length > 0 && (
         <Banner>
           {off.map((s) => monthOf(s.periodStart)).join(', ')}: the rows found don't add up to the change in PayPal's balance, so some may be missing. Check{' '}
@@ -536,6 +553,23 @@ function PaypalSummary({ inspect }: { inspect: PaypalInspect }) {
         <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
           Left out: {skipped.map((s) => `${s.posted} ${s.description} (${s.reason.toLowerCase()})`).join('; ')}.
         </p>
+      )}
+      {elsewhere.length > 0 && (
+        <details className="mt-3 text-sm" open={inspect.count === 0}>
+          <summary className="cursor-pointer font-medium">
+            {plural(elsewhere.length, 'payment')} paid from a card or bank through PayPal (not imported here)
+          </summary>
+          <ul className="mt-2 space-y-1 text-slate-600 dark:text-slate-300">
+            {elsewhere.map((p, i) => (
+              <li key={i} className="flex justify-between gap-3">
+                <span className="truncate">
+                  {p.posted} · {p.description.replace(/^[^:]*: */, '') || p.description} · from your {FROM[p.from]}
+                </span>
+                {p.amount === null ? <span>—</span> : <Amount value={p.amount} />}
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
       {inspect.preview.length > 0 && (
         <ul className="mt-3 space-y-1 text-sm text-slate-600 dark:text-slate-300">

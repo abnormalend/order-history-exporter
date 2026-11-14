@@ -34,6 +34,8 @@ import { loanRoutes } from './routes/loans';
 import { loanService } from './loans/service';
 import { plRoutes } from './routes/pl';
 import { plService } from './pl/service';
+import { returnsRoutes } from './routes/returns';
+import { returnsService } from './returns/service';
 import type { StayService } from './stays/service';
 import { SYNC_ROUTES, syncRoutes } from './routes/sync';
 import { isPrivateAddress, sameSecret } from './security';
@@ -218,7 +220,9 @@ export function buildApp(options: AppOptions): FastifyInstance {
   });
   leaseRoutes(app, leases);
   loanRoutes(app, loanService({ db: db.raw, bank }));
-  plRoutes(app, plService({ db: db.raw, bank, correlate }));
+  const pl = plService({ db: db.raw, bank, correlate });
+  plRoutes(app, pl);
+  returnsRoutes(app, returnsService({ db: db.raw, pl }), (id) => correlate.entities().some((e) => e.id === id));
   authRoutes(app, store, tokens);
 
   const webRoot = options.webRoot;
