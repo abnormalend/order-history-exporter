@@ -1,7 +1,7 @@
 // The owner's own money: what came in, where it went, budgets for each kind of
 // spending, and a look back over the past year and ahead over the next six months.
 import { useMemo, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { FormEvent, ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeftRight,
@@ -13,6 +13,8 @@ import {
   ChevronLeft,
   ChevronRight,
   GraduationCap,
+  HandHeart,
+  HeartHandshake,
   HandCoins,
   HeartPulse,
   House,
@@ -57,6 +59,7 @@ const GROUPS: Record<string, GroupInfo> = {
   travel: { label: 'Travel & fun', colour: '#14b8a6', icon: Plane },
   subscriptions: { label: 'Subscriptions', colour: '#d946ef', icon: Repeat },
   people: { label: 'Sent to people', colour: '#f97316', icon: Users },
+  family: { label: 'Sent to family', colour: '#e11d48', icon: HeartHandshake },
   taxes: { label: 'Taxes & fees', colour: '#64748b', icon: Landmark },
   cash: { label: 'Cash & checks', colour: '#84cc16', icon: Banknote },
   other: { label: 'Not sorted yet', colour: '#94a3b8', icon: Shapes },
@@ -64,6 +67,7 @@ const GROUPS: Record<string, GroupInfo> = {
   reimbursed: { label: 'Reimbursements', colour: '#06b6d4', icon: ReceiptText },
   refunds: { label: 'Refunds & tax refunds', colour: '#22c55e', icon: Undo2 },
   people_in: { label: 'From people', colour: '#f59e0b', icon: HandCoins },
+  family_in: { label: 'From family', colour: '#f472b6', icon: HandHeart },
   side: { label: 'Rent & side income', colour: '#8b5cf6', icon: Store },
   deposits: { label: 'Deposits', colour: '#3b82f6', icon: Banknote },
   other_in: { label: 'Other money in', colour: '#94a3b8', icon: Shapes },
@@ -72,6 +76,8 @@ const GROUPS: Record<string, GroupInfo> = {
   business: { label: 'Your businesses', colour: '#0ea5e9', icon: Store },
   between: { label: 'Between your accounts', colour: '#94a3b8', icon: ArrowLeftRight },
 };
+// The kinds of spending, in order, for choosing what a family category counts as.
+const SPENDING_KEYS = ['home', 'bills', 'food', 'car', 'shopping', 'health', 'education', 'travel', 'subscriptions', 'people', 'family', 'taxes', 'cash', 'other'];
 const info = (key: string): GroupInfo => GROUPS[key] ?? { label: key, colour: '#94a3b8', icon: Shapes };
 
 interface MonthRow {
@@ -142,6 +148,8 @@ interface PersonalData {
   };
   recurring: { key: string; name: string; flow: string; group: string; amount: number; day: number; months: number; paidThisMonth: boolean }[];
   upcoming: { name: string; flow: string; group: string; amount: number; on: string }[];
+  familyLabels: { id: number; name: string; group: string }[];
+  family: { id: number; posted: string; amount: number; name: string; account: string; labelId: number | null; label: string | null; group: string }[];
   last12: { from: string; to: string; spent: { key: string; amount: number }[]; earned: { key: string; amount: number }[] };
 }
 
@@ -235,6 +243,7 @@ export function Personal({ member = false }: { member?: boolean }) {
           <Moved data={data} />
         </div>
       </div>
+      {data.family.length > 0 && <BetweenFamily data={data} onChange={reload} readOnly={member} />}
       <Budgets data={data} onChange={reload} readOnly={member} />
       <div className="mb-5 grid gap-5 lg:grid-cols-2">
         <Pace data={data} />
@@ -769,6 +778,152 @@ function Moved({ data }: { data: PersonalData }) {
         })}
       </ul>
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Savings, investments, your businesses and your own accounts: not counted as money in or out.</p>
+    </Card>
+  );
+}
+
+/* ---------- Between family ---------- */
+
+// Money sent to and from other family members, each with a category of the owner's
+// own: "Monthly allowance", "University fees". The category decides which kind of
+// spending it counts as for the one who sent it, and goes on both sides.
+const NEW_LABEL = 'new';
+function BetweenFamily({ data, onChange, readOnly }: { data: PersonalData; onChange: () => void; readOnly: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [adding, setAdding] = useState<number | null>(null);
+  const [form, setForm] = useState({ name: '', group: 'family' });
+  const rows = data.family;
+  const sent = -rows.filter((r) => r.amount < 0).reduce((s, r) => s + r.amount, 0);
+  const received = rows.filter((r) => r.amount > 0).reduce((s, r) => s + r.amount, 0);
+
+  async function run(action: () => Promise<unknown>) {
+    setBusy(true);
+    setError('');
+    try {
+      await action();
+      onChange();
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  const choose = (id: number, value: string) => {
+    if (value === NEW_LABEL) {
+      setAdding(id);
+      return;
+    }
+    run(() => post('/api/personal/family', { transactionId: id, labelId: value ? Number(value) : null }));
+  };
+  async function addLabel(event: FormEvent) {
+    event.preventDefault();
+    const id = adding!;
+    const ok = await run(async () => {
+      const { id: labelId } = await post<{ id: number }>('/api/personal/labels', { name: form.name.trim(), group: form.group });
+      await post('/api/personal/family', { transactionId: id, labelId });
+    });
+    if (ok) {
+      setAdding(null);
+      setForm({ name: '', group: 'family' });
+    }
+  }
+
+  return (
+    <Card
+      title={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <HeartHandshake className="size-4 text-rose-600" aria-hidden />
+          Between family
+          <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
+            {sent > 0 && `${wholeMoney(sent)} sent`}
+            {sent > 0 && received > 0 && ' · '}
+            {received > 0 && `${wholeMoney(received)} received`}
+          </span>
+        </span>
+      }
+      className="mb-5"
+    >
+      {error && <Banner>{error}</Banner>}
+      <ul className="max-h-96 divide-y divide-slate-100 overflow-y-auto dark:divide-slate-800">
+        {rows.map((r) => {
+          const gi = info(r.group);
+          const I = gi.icon;
+          return (
+            <li key={r.id} className="py-2">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm">
+                <span className="w-12 shrink-0 text-xs text-slate-500">{dayLabel(r.posted)}</span>
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-full" style={{ background: `${gi.colour}22`, color: gi.colour }} title={gi.label}>
+                  <I className="size-3.5" aria-hidden />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{r.name}</span>
+                  <span className="block truncate text-xs text-slate-500">{r.account}</span>
+                </span>
+                <span className={cx('font-medium tabular-nums', r.amount > 0 && 'text-emerald-600 dark:text-emerald-400')}>
+                  {r.amount > 0 ? '+' : '−'}
+                  {wholeMoney(Math.abs(r.amount))}
+                </span>
+                {readOnly ? (
+                  <span className="w-full text-right text-xs text-slate-500 sm:w-44">{r.label ?? 'No category'}</span>
+                ) : (
+                  <select
+                    className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs sm:w-44 dark:border-slate-700 dark:bg-slate-900"
+                    value={adding === r.id ? NEW_LABEL : (r.labelId ?? '')}
+                    disabled={busy}
+                    onChange={(e) => choose(r.id, e.target.value)}
+                    aria-label={`Category for ${r.name} on ${dayLabel(r.posted)}`}
+                  >
+                    <option value="">No category</option>
+                    {data.familyLabels.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}
+                      </option>
+                    ))}
+                    <option value={NEW_LABEL}>New category…</option>
+                  </select>
+                )}
+              </div>
+              {adding === r.id && (
+                <form onSubmit={addLabel} className="mt-2 grid gap-2 rounded-lg bg-slate-50 p-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end dark:bg-slate-800/60">
+                  <label className="flex flex-col gap-1 text-xs font-medium text-slate-600 dark:text-slate-400">
+                    New category
+                    <Input autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Such as Birthday gift" maxLength={60} />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs font-medium text-slate-600 dark:text-slate-400">
+                    Counts as
+                    <select
+                      className="rounded-md border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                      value={form.group}
+                      onChange={(e) => setForm({ ...form, group: e.target.value })}
+                    >
+                      {SPENDING_KEYS.map((k) => (
+                        <option key={k} value={k}>
+                          {info(k).label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex gap-2">
+                    <Button type="submit" variant="primary" busy={busy} disabled={!form.name.trim()}>
+                      Add
+                    </Button>
+                    <Button type="button" onClick={() => setAdding(null)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Money moved between two people's accounts counts as money out for one and in for the other. A category decides what kind of spending it is for whoever sent it, such as Education
+        for university fees, and shows on both sides.
+      </p>
     </Card>
   );
 }

@@ -280,3 +280,68 @@ test('family members have their own accounts and budgets, and a login that sees 
   assert.ok((await get('/api/personal')).accounts.some((a) => a.id === cardId));
   assert.equal((await signIn('a new kid password')).response.status, 401);
 });
+
+test('money sent between family counts for both, and takes a category on both sides', async () => {
+  // The owner's checking sends 500 to a second checking account, matched as a transfer.
+  await post('/api/bank/import', {
+    content: ['Date,Description,Amount', `${usDate(lastMonth, 6)},ONLINE TRANSFER TO CHK ...4242,-500.00`, ''].join('\n'),
+    fileName: 'out.csv',
+    accountId: checkingId,
+  });
+  await post('/api/bank/import', {
+    content: ['Date,Description,Amount', `${usDate(lastMonth, 6)},ONLINE TRANSFER FROM CHK ...1111,500.00`, ''].join('\n'),
+    fileName: 'sib.csv',
+    newAccount: { name: 'Sib checking', kind: 'checking', owner: 'personal' },
+  });
+  const { transactions } = await get('/api/bank/transactions?preset=all&kind=all&q=ONLINE%20TRANSFER');
+  assert.equal(transactions.length, 2);
+  assert.ok(transactions.every((t) => t.kind === 'transfer' && t.transferId), 'the two sides are paired as a transfer');
+  const sent = transactions.find((t) => t.amount < 0);
+
+  // While both accounts are the owner's, it's money moved between their own accounts.
+  let mine = await get(`/api/personal?month=${lastMonth}`);
+  assert.equal(mine.detail.spent, 2465.99);
+  assert.deepEqual(mine.family, []);
+
+  // Once the second account is a family member's, it's money out for one and in for the other.
+  const { accounts } = await get('/api/bank/accounts');
+  const { id: sib } = await post('/api/people', { name: 'Sib Example' });
+  await post(`/api/people/${sib}`, { accounts: [accounts.find((a) => a.name === 'Sib checking').id] });
+  mine = await get(`/api/personal?month=${lastMonth}`);
+  assert.equal(mine.detail.spent, 2965.99);
+  assert.equal(mine.detail.groups.find((g) => g.key === 'family').amount, 500);
+  assert.deepEqual(
+    mine.family.map((r) => [r.name, r.amount, r.label]),
+    [['To Sib Example', -500, null]]
+  );
+  let theirs = await get(`/api/personal?month=${lastMonth}&person=${sib}`);
+  assert.equal(theirs.detail.earned, 500);
+  assert.equal(theirs.detail.sources[0].key, 'family_in');
+  assert.deepEqual(theirs.family.map((r) => r.name), ['From Everyday checking']);
+
+  // A category counts it as that kind of spending for the sender, and shows on both sides.
+  const fees = mine.familyLabels.find((l) => l.name === 'University fees');
+  assert.equal(fees.group, 'education');
+  await post('/api/personal/family', { transactionId: sent.id, labelId: fees.id });
+  mine = await get(`/api/personal?month=${lastMonth}`);
+  assert.equal(mine.detail.groups.find((g) => g.key === 'education').amount, 500);
+  assert.equal(mine.detail.groups.find((g) => g.key === 'family').amount, 0);
+  assert.equal(mine.family[0].label, 'University fees');
+  theirs = await get(`/api/personal?month=${lastMonth}&person=${sib}`);
+  assert.equal(theirs.family[0].label, 'University fees');
+  assert.equal(theirs.detail.earned, 500);
+
+  // New categories of the owner's own.
+  const { id: gift, labels } = await post('/api/personal/labels', { name: 'Birthday gift', group: 'shopping' });
+  assert.ok(labels.some((l) => l.name === 'Birthday gift'));
+  await post('/api/personal/family', { transactionId: sent.id, labelId: gift });
+  assert.equal((await get(`/api/personal?month=${lastMonth}`)).detail.groups.find((g) => g.key === 'shopping').amount, 600);
+  await assert.rejects(post('/api/personal/labels', { name: 'birthday GIFT', group: 'shopping' }), { status: 400 });
+  await assert.rejects(post('/api/personal/labels', { name: 'Pay', group: 'pay' }), { status: 400 });
+  // Only transfers take one.
+  const normal = (await get('/api/bank/transactions?preset=all&q=NETFLIX&limit=1')).transactions[0];
+  await assert.rejects(post('/api/personal/family', { transactionId: normal.id, labelId: gift }), { status: 400 });
+  // And it can be taken off again.
+  await post('/api/personal/family', { transactionId: sent.id, labelId: null });
+  assert.equal((await get(`/api/personal?month=${lastMonth}`)).family[0].label, null);
+});

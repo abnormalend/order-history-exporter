@@ -50,4 +50,30 @@ export function personalRoutes(app: FastifyInstance, personal: PersonalService) 
       throw new HttpError(400, (err as Error).message);
     }
   });
+
+  // Categories for money sent between family, and choosing one for a transfer. The
+  // owner only (a family login is refused before reaching these).
+  app.post('/api/personal/labels', async (request) => {
+    const result = z.object({ name: z.string().trim().min(1).max(60), group: z.string().min(1).max(40) }).safeParse(request.body);
+    if (!result.success) throw new HttpError(400, 'A category needs a name and a kind of spending.');
+    try {
+      const id = personal.addLabel(result.data.name, result.data.group);
+      (request as unknown as AuthedRequest).audit('personal.label.add', { id, ...result.data });
+      return { id, labels: personal.labels() };
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
+
+  app.post('/api/personal/family', async (request) => {
+    const result = z.object({ transactionId: z.number().int().positive(), labelId: z.number().int().positive().nullable() }).safeParse(request.body);
+    if (!result.success) throw new HttpError(400, 'Which transfer, and which category?');
+    try {
+      personal.setFamilyLabel(result.data.transactionId, result.data.labelId);
+      (request as unknown as AuthedRequest).audit('personal.family', result.data);
+      return { ok: true };
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
 }

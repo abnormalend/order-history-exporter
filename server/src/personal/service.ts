@@ -27,6 +27,8 @@ interface Tx {
   group: Group;
   guessed: boolean;
   series: string;
+  // Money sent to or from another family member: who, and the category given to it.
+  family: { pairId: number; other: string; labelId: number | null; label: string | null } | null;
 }
 
 const cents = (n: number) => Math.round(n * 100) / 100;
@@ -55,7 +57,11 @@ const range = (from: string, to: string) => {
 // Bank reference tails ("PPD ID: 123", "Conf# 9") are dropped, and a payment to or from
 // a person is named after them rather than the app that carried it.
 const titleCase = (text: string) => text.replace(/\b[a-z]/g, (c) => c.toUpperCase());
-const nameOf = (t: { payee: string | null; description: string }) => {
+const nameOf = (t: { payee: string | null; description: string; family?: Tx['family'] }) => {
+  if (t.family) {
+    const who = t.family.other;
+    return t.family.label ? `${t.family.label} (${who})` : who;
+  }
   const person = seriesKey(t.description, t.payee);
   if (person.startsWith('person ')) return titleCase(person.slice(7));
   const raw = t.payee && t.payee.length > 2 ? t.payee : t.description.split(/\s+/).slice(0, 4).join(' ');
@@ -81,14 +87,37 @@ export function personalService({ db, today = () => new Date().toISOString().sli
     );
     const rows = db
       .prepare(
-        `SELECT t.id, t.posted, t.amount, t.description, t.payee, t.category, t.account_id, a.name AS account
+        // Transfers count only between two people's accounts: money one family member
+        // sent another. Between one person's own accounts they're still left out.
+        `SELECT t.id, t.posted, t.amount, t.description, t.payee, t.category, t.account_id, a.name AS account, t.kind,
+                p.id AS pair_id, pa.name AS other_account, pp.name AS other_person, pa.person_id AS other_person_id,
+                t.family_label_id, l.name AS label, l.group_key AS label_group
          FROM bank_transactions t JOIN bank_accounts a ON a.id = t.account_id
-         WHERE t.status = 'personal' AND t.kind = 'normal' AND t.amount != 0 AND t.account_id IN (${accountIds.map(Number).join(',')})
+         LEFT JOIN bank_transactions p ON p.id = t.transfer_id
+         LEFT JOIN bank_accounts pa ON pa.id = p.account_id
+         LEFT JOIN personal_people pp ON pp.id = pa.person_id
+         LEFT JOIN personal_labels l ON l.id = t.family_label_id
+         WHERE t.status = 'personal' AND t.amount != 0 AND t.account_id IN (${accountIds.map(Number).join(',')})
+           AND (t.kind = 'normal' OR (t.kind = 'transfer' AND p.id IS NOT NULL AND pa.owner != 'business' AND pa.person_id IS NOT a.person_id))
          ORDER BY t.posted, t.id`
       )
       .all() as Row[];
     return rows.map((r) => {
-      const c = classify({ amount: r.amount, description: r.description, payee: r.payee, category: r.category }, business);
+      const family =
+        r.kind === 'transfer'
+          ? {
+              pairId: Number(r.pair_id),
+              // The other side: a family member by name, or the owner's account by its name.
+              other: `${r.amount < 0 ? 'To' : 'From'} ${r.other_person ?? r.other_account}`,
+              labelId: r.family_label_id == null ? null : Number(r.family_label_id),
+              label: r.label ?? null,
+            }
+          : null;
+      const c = family
+        ? r.amount < 0
+          ? { flow: 'out' as const, group: ((SPENDING_GROUPS as readonly string[]).includes(r.label_group) ? r.label_group : 'family') as Group, guessed: false }
+          : { flow: 'in' as const, group: 'family_in' as Group, guessed: false }
+        : classify({ amount: r.amount, description: r.description, payee: r.payee, category: r.category }, business);
       return {
         id: r.id,
         posted: r.posted,
@@ -103,7 +132,8 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         flow: c.flow,
         group: c.group,
         guessed: c.guessed,
-        series: `${c.flow}:${seriesKey(r.description, r.payee)}`,
+        series: family ? `${c.flow}:family ${family.other} ${family.label ?? ''}` : `${c.flow}:${seriesKey(r.description, r.payee)}`,
+        family,
       };
     });
   }
@@ -121,6 +151,25 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         'INSERT INTO personal_budgets (person_id, group_key, monthly, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (person_id, group_key) DO UPDATE SET monthly = excluded.monthly, updated_at = excluded.updated_at'
       ).run(person ?? 0, group, cents(monthly), new Date().toISOString());
     return budgets(person);
+  }
+
+  // The owner's categories for money sent between family, each counted as a kind of spending.
+  const labels = () =>
+    (db.prepare('SELECT id, name, group_key FROM personal_labels ORDER BY name COLLATE NOCASE').all() as Row[]).map((l) => ({ id: Number(l.id), name: String(l.name), group: String(l.group_key) }));
+
+  function addLabel(name: string, group: string) {
+    if (!(SPENDING_GROUPS as readonly string[]).includes(group)) throw new Error('That is not a kind of spending.');
+    if (db.prepare('SELECT 1 FROM personal_labels WHERE name = ?').get(name)) throw new Error('There is already a category with that name.');
+    const result = db.prepare('INSERT INTO personal_labels (name, group_key, created_at) VALUES (?, ?, ?)').run(name, group, new Date().toISOString());
+    return Number(result.lastInsertRowid);
+  }
+
+  // A category on money sent between family goes on both sides of the transfer.
+  function setFamilyLabel(transactionId: number, labelId: number | null) {
+    const row = db.prepare("SELECT id, transfer_id FROM bank_transactions WHERE id = ? AND kind = 'transfer' AND transfer_id IS NOT NULL").get(transactionId) as Row | undefined;
+    if (!row) throw new Error('That is not a transfer between family.');
+    if (labelId !== null && !db.prepare('SELECT 1 FROM personal_labels WHERE id = ?').get(labelId)) throw new Error('That category is not here.');
+    db.prepare('UPDATE bank_transactions SET family_label_id = ? WHERE id IN (?, ?)').run(labelId, row.id, row.transfer_id);
   }
 
   const people = () => (db.prepare('SELECT id, name FROM personal_people ORDER BY name COLLATE NOCASE').all() as Row[]).map((p) => ({ id: Number(p.id), name: String(p.name) }));
@@ -417,11 +466,17 @@ export function personalService({ db, today = () => new Date().toISOString().sli
       },
       recurring,
       upcoming,
+      familyLabels: labels(),
+      // Money sent to and from other family members in what was picked, newest first.
+      family: inSpan
+        .filter((t) => t.family)
+        .sort((a, b) => b.posted.localeCompare(a.posted) || b.id - a.id)
+        .map((t) => ({ id: t.id, posted: t.posted, amount: t.amount, name: t.family!.other, account: t.account, labelId: t.family!.labelId, label: t.family!.label, group: t.group })),
       last12: { from: lastYear[0], to: lastYear[lastYear.length - 1], spent: yearSpent, earned: yearEarned },
     };
   }
 
-  return { summary, budgets, setBudget, accounts, people };
+  return { summary, budgets, setBudget, accounts, people, labels, addLabel, setFamilyLabel };
 }
 
 export type PersonalService = ReturnType<typeof personalService>;

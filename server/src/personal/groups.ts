@@ -5,8 +5,8 @@
 
 export type Flow = 'in' | 'out' | 'move';
 
-export const SPENDING_GROUPS = ['home', 'bills', 'food', 'car', 'shopping', 'health', 'education', 'travel', 'subscriptions', 'people', 'taxes', 'cash', 'other'] as const;
-export const INCOME_GROUPS = ['pay', 'reimbursed', 'refunds', 'people_in', 'side', 'deposits', 'other_in'] as const;
+export const SPENDING_GROUPS = ['home', 'bills', 'food', 'car', 'shopping', 'health', 'education', 'travel', 'subscriptions', 'people', 'family', 'taxes', 'cash', 'other'] as const;
+export const INCOME_GROUPS = ['pay', 'reimbursed', 'refunds', 'people_in', 'family_in', 'side', 'deposits', 'other_in'] as const;
 export const MOVE_GROUPS = ['invested', 'from_savings', 'business', 'between'] as const;
 export type SpendingGroup = (typeof SPENDING_GROUPS)[number];
 export type IncomeGroup = (typeof INCOME_GROUPS)[number];

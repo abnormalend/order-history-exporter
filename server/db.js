@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 25;
+const SCHEMA_VERSION = 26;
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -586,6 +586,22 @@ const SCHEMA_V17 = `
 // A business that has closed keeps its history, marked with the day it closed. And
 // what each business reported on its tax return, line by line, to compare with what
 // Business Hub has for the same year.
+// Money sent between family members counts in My money, and can be given a category
+// of the owner's own ("Monthly allowance", "University fees"), each counted as a kind
+// of spending for the sender. Both sides of a transfer carry the same category.
+const SCHEMA_V26 = `
+  CREATE TABLE personal_labels (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    group_key TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  ALTER TABLE bank_transactions ADD COLUMN family_label_id INTEGER;
+  INSERT INTO personal_labels (name, group_key, created_at) VALUES
+    ('Monthly allowance', 'family', strftime('%Y-%m-%dT%H:%M:%fZ')),
+    ('University fees', 'education', strftime('%Y-%m-%dT%H:%M:%fZ'));
+`;
+
 // Family members with their own accounts and budgets in My money, and logins that see
 // only their own money. An account or login with no person is the owner's; budgets
 // for the owner are person 0.
@@ -887,6 +903,7 @@ function migrate(db, file) {
     if (version < 23) db.exec(SCHEMA_V23);
     if (version < 24) db.exec(SCHEMA_V24);
     if (version < 25) db.exec(SCHEMA_V25);
+    if (version < 26) db.exec(SCHEMA_V26);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
