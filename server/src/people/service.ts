@@ -1,0 +1,104 @@
+// Family members: each has their own accounts and budgets in My money, and may have a
+// login that sees only their own money. Managed by the owner.
+import type { DatabaseSync } from 'node:sqlite';
+import type { AuthStore } from '../auth';
+import { HttpError } from '../params';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = Record<string, any>;
+
+export function peopleService({ db, auth }: { db: DatabaseSync; auth: AuthStore }) {
+  const exists = (id: number) => {
+    if (!db.prepare('SELECT 1 FROM personal_people WHERE id = ?').get(id)) throw new HttpError(404, 'That person is not here.');
+  };
+
+  // Accounts that can belong to someone: personal and shared ones, never a business's.
+  function accounts() {
+    return (db.prepare("SELECT id, name, institution, owner, person_id FROM bank_accounts WHERE owner != 'business' ORDER BY name COLLATE NOCASE").all() as Row[]).map((a) => ({
+      id: Number(a.id),
+      name: String(a.name),
+      institution: a.institution ?? null,
+      owner: String(a.owner),
+      personId: a.person_id == null ? null : Number(a.person_id),
+    }));
+  }
+
+  function list() {
+    const people = db.prepare('SELECT id, name FROM personal_people ORDER BY name COLLATE NOCASE').all() as Row[];
+    const owned = accounts();
+    return {
+      people: people.map((p) => {
+        const login = db.prepare("SELECT id, username, totp_secret FROM users WHERE role = 'member' AND person_id = ?").get(p.id) as Row | undefined;
+        return {
+          id: Number(p.id),
+          name: String(p.name),
+          accounts: owned.filter((a) => a.personId === Number(p.id)).map((a) => a.id),
+          login: login ? { id: Number(login.id), username: String(login.username), totpEnabled: Boolean(login.totp_secret) } : null,
+        };
+      }),
+      accounts: owned,
+    };
+  }
+
+  function add(name: string) {
+    if (db.prepare('SELECT 1 FROM personal_people WHERE name = ?').get(name)) throw new HttpError(409, 'Someone with that name is already here.');
+    const result = db.prepare('INSERT INTO personal_people (name, created_at) VALUES (?, ?)').run(name, new Date().toISOString());
+    return Number(result.lastInsertRowid);
+  }
+
+  function update(id: number, change: { name?: string; accounts?: number[] }) {
+    exists(id);
+    if (change.name !== undefined) {
+      const clash = db.prepare('SELECT id FROM personal_people WHERE name = ? AND id != ?').get(change.name, id);
+      if (clash) throw new HttpError(409, 'Someone with that name is already here.');
+      db.prepare('UPDATE personal_people SET name = ? WHERE id = ?').run(change.name, id);
+    }
+    if (change.accounts) {
+      const allowed = new Set(accounts().map((a) => a.id));
+      const bad = change.accounts.find((a) => !allowed.has(a));
+      if (bad !== undefined) throw new HttpError(400, "A business's account can't belong to a person.");
+      db.prepare('UPDATE bank_accounts SET person_id = NULL WHERE person_id = ?').run(id);
+      const set = db.prepare('UPDATE bank_accounts SET person_id = ? WHERE id = ?');
+      for (const account of change.accounts) set.run(id, account);
+    }
+  }
+
+  // Their accounts go back to the owner, their budgets and login go.
+  function remove(id: number) {
+    exists(id);
+    db.prepare('UPDATE bank_accounts SET person_id = NULL WHERE person_id = ?').run(id);
+    db.prepare('DELETE FROM personal_budgets WHERE person_id = ?').run(id);
+    db.prepare("DELETE FROM users WHERE role = 'member' AND person_id = ?").run(id);
+    db.prepare('DELETE FROM personal_people WHERE id = ?').run(id);
+  }
+
+  const loginOf = (id: number) => db.prepare("SELECT id, username FROM users WHERE role = 'member' AND person_id = ?").get(id) as Row | undefined;
+
+  function addLogin(id: number, username: string, password: string) {
+    exists(id);
+    if (loginOf(id)) throw new HttpError(409, 'They already have a login. Reset its password instead.');
+    if (auth.record(username)) throw new HttpError(409, 'That username is taken.');
+    return auth.createUser(username, password, id);
+  }
+
+  function resetPassword(id: number, password: string) {
+    const login = loginOf(id);
+    if (!login) throw new HttpError(404, "They don't have a login.");
+    auth.setPassword(Number(login.id), password);
+    // A reset by the owner also clears two-factor, in case their phone was lost.
+    auth.disableTotp(Number(login.id));
+    return String(login.username);
+  }
+
+  function removeLogin(id: number) {
+    const login = loginOf(id);
+    if (!login) throw new HttpError(404, "They don't have a login.");
+    db.prepare('DELETE FROM users WHERE id = ?').run(login.id);
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(login.id);
+    return String(login.username);
+  }
+
+  return { list, add, update, remove, addLogin, resetPassword, removeLogin };
+}
+
+export type PeopleService = ReturnType<typeof peopleService>;

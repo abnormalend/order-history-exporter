@@ -37,8 +37,16 @@ export function useNav(): NavEntry[] {
 // On phones, the pages without a tab of their own are under More.
 const PHONE_NAV = [...NAV.filter((n) => n.phone), { to: '/more', label: 'More', icon: Menu, end: false, phone: true }];
 
-export function Layout({ username, onSignOut, children }: { username: string; onSignOut: () => void; children: ReactNode }) {
-  const nav = useNav();
+// A family member's login: their own money and their sign-in settings, nothing else.
+const MEMBER_NAV: NavEntry[] = [
+  { to: '/personal', label: 'My money', icon: Wallet, phone: true },
+  { to: '/settings', label: 'Settings', icon: Settings, phone: true },
+];
+
+export function Layout({ username, member = false, onSignOut, children }: { username: string; member?: boolean; onSignOut: () => void; children: ReactNode }) {
+  const businessNav = useNav();
+  const nav = member ? MEMBER_NAV : businessNav;
+  const phoneNav = member ? MEMBER_NAV : PHONE_NAV;
   return (
     <div className="min-h-dvh md:grid md:grid-cols-[15rem_1fr]">
       {/* Stays in place while the page scrolls; scrolls itself if the window is short. */}
@@ -47,7 +55,7 @@ export function Layout({ username, onSignOut, children }: { username: string; on
           <Wallet className="size-6 text-emerald-400" aria-hidden />
           <span className="text-lg font-semibold tracking-tight">Business Hub</span>
         </div>
-        <BusinessPicker className="mx-3 mb-3" />
+        {!member && <BusinessPicker className="mx-3 mb-3" />}
         <nav aria-label="Main" className="flex-1 space-y-1 px-3">
           {nav.map(({ to, label, icon: Icon, end, divider }) => [
             divider && <hr key={`${to}-divider`} className="!my-3 border-slate-700" aria-hidden />,
@@ -81,21 +89,25 @@ export function Layout({ username, onSignOut, children }: { username: string; on
             <Wallet className="size-5 text-emerald-400" aria-hidden />
             <span className="hidden min-[400px]:inline">Business Hub</span>
           </span>
-          <BusinessPicker className="mx-3 min-w-0 flex-1" />
+          {member ? <span className="flex-1" /> : <BusinessPicker className="mx-3 min-w-0 flex-1" />}
           <button type="button" onClick={onSignOut} className="inline-flex items-center gap-1.5 text-sm text-slate-300" aria-label="Sign out">
             <LogOut className="size-4" aria-hidden />
           </button>
         </header>
         <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 pb-24 md:px-8 md:pb-10">
           {children}
-          <ExpiryWarning />
-          <LoanPaymentPrompt />
-          <UpdateNotice />
+          {!member && (
+            <>
+              <ExpiryWarning />
+              <LoanPaymentPrompt />
+              <UpdateNotice />
+            </>
+          )}
         </main>
       </div>
 
-      <nav aria-label="Main" className="safe-bottom fixed inset-x-0 bottom-0 z-20 grid grid-cols-5 border-t border-slate-200 bg-white md:hidden dark:border-slate-800 dark:bg-slate-900">
-        {PHONE_NAV.map(({ to, label, icon: Icon, end }) => (
+      <nav aria-label="Main" className="safe-bottom fixed inset-x-0 bottom-0 z-20 grid border-t border-slate-200 bg-white md:hidden dark:border-slate-800 dark:bg-slate-900" style={{ gridTemplateColumns: `repeat(${phoneNav.length}, minmax(0, 1fr))` }}>
+        {phoneNav.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
             to={to}
@@ -103,7 +115,7 @@ export function Layout({ username, onSignOut, children }: { username: string; on
             className={({ isActive }) => cx('flex flex-col items-center gap-0.5 pt-2 text-[11px] font-medium', isActive ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')}
           >
             <Icon className="size-5" aria-hidden />
-            {label.split(' ')[0]}
+            {phoneNav.length <= 3 ? label : label.split(' ')[0]}
           </NavLink>
         ))}
       </nav>

@@ -45,7 +45,7 @@ export function authRoutes(app: FastifyInstance, store: AuthStore, tokens: Token
 
   app.get('/api/auth/state', async (request) => {
     const user = (request as AuthedRequest).user;
-    return { setupNeeded: !store.hasUsers(), user: user ? { username: user.username, totpEnabled: user.totpEnabled } : null };
+    return { setupNeeded: !store.hasUsers(), user: user ? store.describe(user) : null };
   });
 
   // First run only. The setup code is the access token printed by the server, so
@@ -63,7 +63,7 @@ export function authRoutes(app: FastifyInstance, store: AuthStore, tokens: Token
     const user = store.createUser(body.username, body.password);
     store.audit(user.username, 'account.create');
     startSession(request, reply, user.id);
-    return { user: { username: user.username, totpEnabled: false } };
+    return { user: store.describe(user) };
   });
 
   app.post('/api/auth/login', async (request, reply) => {
@@ -86,7 +86,7 @@ export function authRoutes(app: FastifyInstance, store: AuthStore, tokens: Token
     keys.forEach((key) => throttle.clear(key));
     store.audit(record.username, 'login');
     startSession(request, reply, record.id);
-    return { user: { username: record.username, totpEnabled: Boolean(record.totp_secret) } };
+    return { user: store.describe(store.userById(record.id)!) };
   });
 
   app.post('/api/auth/logout', async (request, reply) => {

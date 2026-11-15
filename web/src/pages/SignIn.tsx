@@ -7,6 +7,9 @@ import { Banner, Button, Field, Input } from '../ui';
 export interface SignedInUser {
   username: string;
   totpEnabled: boolean;
+  // The owner sees everything; a family member's login sees only their own money.
+  role: 'owner' | 'member';
+  person: { id: number; name: string } | null;
 }
 
 function Shell({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {

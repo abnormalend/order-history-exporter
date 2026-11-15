@@ -38,6 +38,8 @@ import { returnsRoutes } from './routes/returns';
 import { returnsService } from './returns/service';
 import { personalRoutes } from './routes/personal';
 import { personalService } from './personal/service';
+import { peopleRoutes } from './routes/people';
+import { peopleService } from './people/service';
 import type { StayService } from './stays/service';
 import { SYNC_ROUTES, syncRoutes } from './routes/sync';
 import { isPrivateAddress, sameSecret } from './security';
@@ -95,6 +97,9 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Content-Security-Policy':
     "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
+// All a family member's login can reach besides signing in: their own money.
+const MEMBER_ROUTES = new Set(['GET /api/personal']);
+
 const isLoopback = (address: string) => address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 
 export function buildApp(options: AppOptions): FastifyInstance {
@@ -150,6 +155,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
     }
     if (routeKey.startsWith('GET /api/auth/') || routeKey.startsWith('POST /api/auth/')) return; // checked per route
     if (!authed.user) throw new HttpError(401, SYNC_ROUTES.has(routeKey) ? 'The access token is missing or wrong.' : 'Please sign in.');
+    if (authed.user.role !== 'owner' && !MEMBER_ROUTES.has(routeKey)) throw new HttpError(403, 'Your login can only see your own money.');
   });
 
   app.setErrorHandler((error: Error & { status?: number; statusCode?: number }, request, reply) => {
@@ -225,6 +231,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   const pl = plService({ db: db.raw, bank, correlate });
   plRoutes(app, pl);
   personalRoutes(app, personalService({ db: db.raw }));
+  peopleRoutes(app, peopleService({ db: db.raw, auth: store }));
   returnsRoutes(app, returnsService({ db: db.raw, pl }), (id) => correlate.entities().some((e) => e.id === id));
   authRoutes(app, store, tokens);
 

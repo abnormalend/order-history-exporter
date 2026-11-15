@@ -1,4 +1,4 @@
-// The owner's personal money, month by month: what came in, where it went, what was
+// Personal money, month by month or a year at a time: what came in, where it went, what was
 // only moved between their own pots, budgets for each kind of spending, and a look
 // ahead built from regular paychecks and bills, budgets and typical months.
 //
@@ -62,18 +62,28 @@ const nameOf = (t: { payee: string | null; description: string }) => {
   return raw.replace(/\s+\b(des|id|indn|ppd|ccd|web|entry|descr|conf|ref|confirmation)\b[:#]?.*$/i, '').trim() || raw;
 };
 
+export interface SummaryOptions {
+  // One month (2026-11), or a whole year (2026) in its place.
+  month?: string | null;
+  year?: string | null;
+  // Some of the person's accounts only; others are ignored.
+  accounts?: number[] | null;
+  // Whose money: a family member's id, or null for the owner's own.
+  person?: number | null;
+}
+
 export function personalService({ db, today = () => new Date().toISOString().slice(0, 10) }: { db: DatabaseSync; today?: () => string }) {
-  function load(accountIds: number[] | null): Tx[] {
+  function load(accountIds: number[]): Tx[] {
+    if (!accountIds.length) return [];
     // Transfers to the owner's business accounts are money moved, not spent.
     const business = businessPattern(
       (db.prepare("SELECT last4 FROM bank_accounts WHERE last4 IS NOT NULL AND (owner != 'personal' OR entity_id IS NOT NULL)").all() as Row[]).map((r) => String(r.last4))
     );
-    const where = accountIds?.length ? `AND t.account_id IN (${accountIds.map(Number).join(',')})` : '';
     const rows = db
       .prepare(
         `SELECT t.id, t.posted, t.amount, t.description, t.payee, t.category, t.account_id, a.name AS account
          FROM bank_transactions t JOIN bank_accounts a ON a.id = t.account_id
-         WHERE t.status = 'personal' AND t.kind = 'normal' AND t.amount != 0 ${where}
+         WHERE t.status = 'personal' AND t.kind = 'normal' AND t.amount != 0 AND t.account_id IN (${accountIds.map(Number).join(',')})
          ORDER BY t.posted, t.id`
       )
       .all() as Row[];
@@ -98,42 +108,63 @@ export function personalService({ db, today = () => new Date().toISOString().sli
     });
   }
 
-  const budgets = (): Record<string, number> =>
-    Object.fromEntries((db.prepare('SELECT group_key, monthly FROM personal_budgets').all() as Row[]).map((r) => [r.group_key, r.monthly]));
+  // Budgets are each person's own; the owner's are person 0.
+  const budgets = (person: number | null = null): Record<string, number> =>
+    Object.fromEntries((db.prepare('SELECT group_key, monthly FROM personal_budgets WHERE person_id = ?').all(person ?? 0) as Row[]).map((r) => [r.group_key, r.monthly]));
 
-  function setBudget(group: string, monthly: number | null) {
+  function setBudget(person: number | null, group: string, monthly: number | null) {
     if (!(SPENDING_GROUPS as readonly string[]).includes(group)) throw new Error('That is not a kind of spending.');
-    if (monthly === null || monthly <= 0) db.prepare('DELETE FROM personal_budgets WHERE group_key = ?').run(group);
+    if (person !== null && !db.prepare('SELECT 1 FROM personal_people WHERE id = ?').get(person)) throw new Error('That person is not here.');
+    if (monthly === null || monthly <= 0) db.prepare('DELETE FROM personal_budgets WHERE person_id = ? AND group_key = ?').run(person ?? 0, group);
     else
-      db.prepare('INSERT INTO personal_budgets (group_key, monthly, updated_at) VALUES (?, ?, ?) ON CONFLICT (group_key) DO UPDATE SET monthly = excluded.monthly, updated_at = excluded.updated_at').run(
-        group,
-        cents(monthly),
-        new Date().toISOString()
-      );
-    return budgets();
+      db.prepare(
+        'INSERT INTO personal_budgets (person_id, group_key, monthly, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (person_id, group_key) DO UPDATE SET monthly = excluded.monthly, updated_at = excluded.updated_at'
+      ).run(person ?? 0, group, cents(monthly), new Date().toISOString());
+    return budgets(person);
   }
 
-  // Accounts with personal money in them, for the picker.
-  function accounts() {
+  const people = () => (db.prepare('SELECT id, name FROM personal_people ORDER BY name COLLATE NOCASE').all() as Row[]).map((p) => ({ id: Number(p.id), name: String(p.name) }));
+
+  // A person's accounts with personal money in them: personal accounts, and shared ones
+  // with some personal spending. A business's own accounts never count, even when a
+  // payment in one was marked personal.
+  function accounts(person: number | null) {
     return (
       db
         .prepare(
-          `SELECT a.id, a.name, a.institution, a.kind, a.owner, a.balance, a.balance_date,
+          `SELECT a.id, a.name, a.institution, a.kind, a.owner, a.balance, a.balance_date, a.person_id,
                   (SELECT COUNT(*) FROM bank_transactions t WHERE t.account_id = a.id AND t.status = 'personal') AS personal
-           FROM bank_accounts a ORDER BY a.name COLLATE NOCASE`
+           FROM bank_accounts a WHERE a.owner != 'business' AND a.person_id IS ? ORDER BY a.name COLLATE NOCASE`
         )
-        .all() as Row[]
+        .all(person) as Row[]
     )
       .filter((a) => a.owner === 'personal' || a.personal > 0)
-      .map((a) => ({ id: a.id, name: a.name, institution: a.institution ?? null, kind: a.kind, balance: a.balance ?? null, balanceDate: a.balance_date ?? null, transactions: a.personal }));
+      .map((a) => ({ id: Number(a.id), name: String(a.name), institution: a.institution ?? null, kind: a.kind, balance: a.balance ?? null, balanceDate: a.balance_date ?? null, transactions: a.personal }));
   }
 
-  function summary(selected: string | null, accountIds: number[] | null) {
+  function summary(options: SummaryOptions = {}) {
     const todayDate = today();
     const thisMonth = monthOf(todayDate);
-    const month = selected && /^\d{4}-\d{2}$/.test(selected) ? selected : thisMonth;
-    const all = load(accountIds);
-    const plan = budgets();
+    const person = options.person ?? null;
+    const year = options.year && /^\d{4}$/.test(options.year) ? options.year : null;
+    const period: 'month' | 'year' = year ? 'year' : 'month';
+    const month = year
+      ? thisMonth.startsWith(year)
+        ? thisMonth
+        : `${year}-12` < thisMonth
+          ? `${year}-12`
+          : `${year}-01`
+      : options.month && /^\d{4}-\d{2}$/.test(options.month)
+        ? options.month
+        : thisMonth;
+    const span = year ? range(`${year}-01`, `${year}-12`) : [month];
+
+    const mine = accounts(person);
+    // Accounts picked that aren't this person's are ignored; none left means all of theirs.
+    const picked = options.accounts?.length ? mine.filter((a) => options.accounts!.includes(a.id)) : [];
+    const chosen = picked.length ? picked : mine;
+    const all = load(chosen.map((a) => a.id));
+    const plan = budgets(person);
 
     // Totals for each month and group.
     const byMonth = new Map<string, Map<string, number>>();
@@ -146,6 +177,7 @@ export function personalService({ db, today = () => new Date().toISOString().sli
     const groupTotal = (m: string, g: string) => byMonth.get(m)?.get(g) || 0;
     const spentIn = (m: string) => -SPENDING_GROUPS.reduce((s, g) => s + groupTotal(m, g), 0);
     const earnedIn = (m: string) => INCOME_GROUPS.reduce((s, g) => s + groupTotal(m, g), 0);
+    const sum = (list: string[], f: (m: string) => number) => list.reduce((s, m) => s + f(m), 0);
 
     // Typical months: the median of the last six complete ones, so one tuition bill
     // or holiday doesn't set the pace.
@@ -164,7 +196,7 @@ export function personalService({ db, today = () => new Date().toISOString().sli
       slots.set(`${t.series}|${t.month}`, slot);
       const key = `${t.series}#${slot}`;
       let s = seriesMonths.get(key);
-      if (!s) seriesMonths.set(key, (s ={ months: new Map(), days: [], group: t.group, flow: t.flow, name: nameOf(t) }));
+      if (!s) seriesMonths.set(key, (s = { months: new Map(), days: [], group: t.group, flow: t.flow, name: nameOf(t) }));
       s.months.set(t.month, (s.months.get(t.month) || 0) + t.amount);
       s.days.push(t.day);
     }
@@ -188,17 +220,22 @@ export function personalService({ db, today = () => new Date().toISOString().sli
       .sort((a, b) => a.day - b.day);
     const recurringIncome = recurring.filter((r) => r.flow === 'in');
 
-    // The months shown: a year back and six months ahead, or around the month picked.
-    const longAgo = month < addMonths(thisMonth, -12);
-    const first = longAgo ? addMonths(month, -6) : addMonths(thisMonth, -12);
-    const last = longAgo ? addMonths(month, 6) : addMonths(thisMonth, 6);
-    const firstData = all[0]?.month ?? thisMonth;
+    // Where a month is heading: what's in so far plus the regular pay still to come,
+    // and for each kind of spending the larger of what's gone out and what's expected.
     const projectedEarned = (m: string) =>
       m === thisMonth ? earnedIn(m) + recurringIncome.filter((r) => !r.paidThisMonth).reduce((s, r) => s + r.amount, 0) : recurringIncome.reduce((s, r) => s + r.amount, 0);
     const projectedSpent = (m: string) => SPENDING_GROUPS.reduce((s, g) => s + (m === thisMonth ? Math.max(-groupTotal(m, g), expected(g)) : expected(g)), 0);
+
+    // The months shown: a year back and six months ahead, or around what was picked.
+    let first = addMonths(thisMonth, -12);
+    let last = addMonths(thisMonth, 6);
+    if (span[0] < first || span[span.length - 1] > last) {
+      first = addMonths(span[0], year ? -3 : -6);
+      last = addMonths(span[span.length - 1], year ? 3 : 6);
+    }
+    const firstData = all[0]?.month ?? thisMonth;
     const months = range(first, last).map((m) => {
       const future = m > thisMonth;
-      const before = m < firstData;
       const earned = future ? 0 : earnedIn(m);
       const spent = future ? 0 : spentIn(m);
       return {
@@ -210,23 +247,29 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         business: cents(-groupTotal(m, 'business')),
         future,
         current: m === thisMonth,
-        noData: before,
+        noData: m < firstData,
         projectedEarned: future || m === thisMonth ? cents(projectedEarned(m)) : null,
         projectedSpent: future || m === thisMonth ? cents(projectedSpent(m)) : null,
+        cumulative: 0,
       };
     });
     // Running savings: what's been kept so far over the months shown, carried on by the forecast.
     let running = 0;
     for (const m of months) {
       running += m.future ? (m.projectedEarned ?? 0) - (m.projectedSpent ?? 0) : m.kept;
-      (m as Row).cumulative = cents(running);
+      m.cumulative = cents(running);
     }
 
-    // The month picked, in detail.
-    const future = month > thisMonth;
-    const inMonth = all.filter((t) => t.month === month);
+    // What was picked, in detail: actual money for the months that have happened (this
+    // one so far), a forecast for a span that's all ahead.
+    const past = span.filter((m) => m <= thisMonth);
+    const ahead = span.filter((m) => m > thisMonth);
+    const future = past.length === 0;
+    const current = span.includes(thisMonth);
+    const n = span.length;
+    const inSpan = all.filter((t) => span.includes(t.month));
     const groupRows = SPENDING_GROUPS.map((g) => {
-      const list = inMonth.filter((t) => t.group === g);
+      const list = inSpan.filter((t) => t.group === g);
       const merchants = new Map<string, { name: string; amount: number; count: number }>();
       for (const t of list) {
         const name = nameOf(t);
@@ -236,17 +279,19 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         found.count++;
         merchants.set(key, found);
       }
-      const spent = future ? expected(g) : -list.reduce((s, t) => s + t.amount, 0);
+      const actual = -list.reduce((s, t) => s + t.amount, 0);
       // How much of this usually goes out by this day of the month: rent on the 1st is
       // on pace on the 2nd, though a straight line through the month says otherwise.
-      const byDay = month === thisMonth ? Number(todayDate.slice(8, 10)) : null;
+      const byDay = period === 'month' && current ? Number(todayDate.slice(8, 10)) : null;
       const typicalSoFar =
         byDay === null ? null : cents(Math.max(0, -median(recent.map((m) => all.filter((t) => t.month === m && t.group === g && t.day <= byDay).reduce((s, t) => s + t.amount, 0)))));
       return {
         key: g,
-        amount: cents(spent),
-        budget: plan[g] ?? null,
-        typical: typical[g],
+        amount: cents(future ? expected(g) * n : actual),
+        // Where it's heading by the end of the span.
+        projected: cents(actual + ahead.length * expected(g) + (current ? Math.max(0, expected(g) + groupTotal(thisMonth, g)) : 0)),
+        budget: plan[g] != null ? cents(plan[g] * n) : null,
+        typical: cents(typical[g] * n),
         typicalSoFar,
         count: list.length,
         merchants: [...merchants.values()].sort((a, b) => b.amount - a.amount).slice(0, 6).map((x) => ({ ...x, amount: cents(x.amount) })),
@@ -257,7 +302,7 @@ export function personalService({ db, today = () => new Date().toISOString().sli
       };
     });
     const sourceRows = INCOME_GROUPS.map((g) => {
-      const list = future ? [] : inMonth.filter((t) => t.group === g);
+      const list = future ? [] : inSpan.filter((t) => t.group === g);
       const payers = new Map<string, { name: string; amount: number; count: number }>();
       for (const t of list) {
         const name = nameOf(t);
@@ -266,58 +311,89 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         found.count++;
         payers.set(name.toLowerCase(), found);
       }
-      const amount = future ? recurringIncome.filter((r) => r.group === g).reduce((s, r) => s + r.amount, 0) : list.reduce((s, t) => s + t.amount, 0);
+      const amount = future ? n * recurringIncome.filter((r) => r.group === g).reduce((s, r) => s + r.amount, 0) : list.reduce((s, t) => s + t.amount, 0);
       return { key: g, amount: cents(amount), count: list.length, payers: [...payers.values()].sort((a, b) => b.amount - a.amount).slice(0, 5).map((x) => ({ ...x, amount: cents(x.amount) })) };
     }).filter((s) => s.amount !== 0);
-    const moveRows = MOVE_GROUPS.map((g) => ({ key: g, amount: cents(future ? 0 : inMonth.filter((t) => t.group === g).reduce((s, t) => s + t.amount, 0)) })).filter((m) => m.amount !== 0);
+    const moveRows = MOVE_GROUPS.map((g) => ({ key: g, amount: cents(inSpan.filter((t) => t.group === g).reduce((s, t) => s + t.amount, 0)) })).filter((m) => m.amount !== 0);
 
-    // How the month's spending built up, day by day, beside a typical month.
-    const days = daysIn(month);
-    const cumulative = (m: string, upTo: number) => {
-      const daily = Array(days).fill(0);
-      for (const t of all) if (t.month === m && t.flow === 'out') daily[Math.min(days, t.day) - 1] += -t.amount;
+    // How the spending built up: day by day through a month, or month by month through
+    // a year, beside a typical one.
+    const expectedTotal = SPENDING_GROUPS.reduce((s, g) => s + expected(g), 0);
+    const hasPlan = Object.keys(plan).length > 0;
+    let pace: { unit: 'day' | 'month'; days: number; actual: number[]; typical: number[]; budget: number | null };
+    if (period === 'year') {
       let run = 0;
-      return daily.slice(0, upTo).map((d) => cents((run += d)));
-    };
-    const shownDays = month === thisMonth ? Number(todayDate.slice(8, 10)) : future ? 0 : days;
-    const typicalCurves = recent.map((m) => cumulative(m, days));
-    const pace = {
-      days,
-      actual: shownDays ? cumulative(month, shownDays) : [],
-      typical: Array.from({ length: days }, (_, i) => cents(median(typicalCurves.map((c) => c[i] ?? c[c.length - 1] ?? 0)))),
-      budget: Object.keys(plan).length ? cents(SPENDING_GROUPS.reduce((s, g) => s + expected(g), 0)) : null,
-    };
+      const typicalTotal = SPENDING_GROUPS.reduce((s, g) => s + typical[g], 0);
+      pace = {
+        unit: 'month',
+        days: 12,
+        actual: past.map((m) => cents((run += spentIn(m)))),
+        typical: span.map((_, i) => cents(typicalTotal * (i + 1))),
+        budget: hasPlan ? cents(expectedTotal * 12) : null,
+      };
+    } else {
+      const days = daysIn(month);
+      const cumulative = (m: string, upTo: number) => {
+        const daily = Array(days).fill(0);
+        for (const t of all) if (t.month === m && t.flow === 'out') daily[Math.min(days, t.day) - 1] += -t.amount;
+        let run = 0;
+        return daily.slice(0, upTo).map((d) => cents((run += d)));
+      };
+      const shownDays = current ? Number(todayDate.slice(8, 10)) : future ? 0 : days;
+      const typicalCurves = recent.map((m) => cumulative(m, days));
+      pace = {
+        unit: 'day',
+        days,
+        actual: shownDays ? cumulative(month, shownDays) : [],
+        typical: Array.from({ length: days }, (_, i) => cents(median(typicalCurves.map((c) => c[i] ?? c[c.length - 1] ?? 0)))),
+        budget: hasPlan ? cents(expectedTotal) : null,
+      };
+    }
 
-    const earned = future ? projectedEarned(month) : earnedIn(month);
-    const spent = future ? projectedSpent(month) : spentIn(month);
+    const earned = future ? sum(span, projectedEarned) : sum(past, earnedIn);
+    const spent = future ? sum(span, projectedSpent) : sum(past, spentIn);
+    // Where a span under way is heading: what's happened, plus the forecast for the rest.
+    const outlook =
+      current && !future
+        ? {
+            earned: cents(sum(span, (m) => (m < thisMonth ? earnedIn(m) : projectedEarned(m)))),
+            spent: cents(sum(span, (m) => (m < thisMonth ? spentIn(m) : projectedSpent(m)))),
+          }
+        : null;
     const upcoming = (() => {
       // Regular payments still to come in the next five weeks.
       const out: { name: string; flow: Flow; group: Group; amount: number; on: string }[] = [];
-      const start = todayDate;
       const end = new Date(Date.parse(`${todayDate}T00:00:00Z`) + 35 * 86400000).toISOString().slice(0, 10);
       for (const m of [thisMonth, addMonths(thisMonth, 1)]) {
         for (const r of recurring) {
           if (m === thisMonth && r.paidThisMonth) continue;
           const on = `${m}-${String(Math.min(r.day, daysIn(m))).padStart(2, '0')}`;
-          if (on >= start && on <= end) out.push({ name: r.name, flow: r.flow, group: r.group, amount: r.amount, on });
+          if (on >= todayDate && on <= end) out.push({ name: r.name, flow: r.flow, group: r.group, amount: r.amount, on });
         }
       }
       return out.sort((a, b) => a.on.localeCompare(b.on));
     })();
 
     // The last twelve complete months together.
-    const year = range(addMonths(thisMonth, -12), addMonths(thisMonth, -1));
-    const yearSpent = SPENDING_GROUPS.map((g) => ({ key: g, amount: cents(-year.reduce((s, m) => s + groupTotal(m, g), 0)) })).filter((g) => g.amount > 0);
-    const yearEarned = INCOME_GROUPS.map((g) => ({ key: g, amount: cents(year.reduce((s, m) => s + groupTotal(m, g), 0)) })).filter((g) => g.amount > 0);
+    const lastYear = range(addMonths(thisMonth, -12), addMonths(thisMonth, -1));
+    const yearSpent = SPENDING_GROUPS.map((g) => ({ key: g, amount: cents(-lastYear.reduce((s, m) => s + groupTotal(m, g), 0)) })).filter((g) => g.amount > 0);
+    const yearEarned = INCOME_GROUPS.map((g) => ({ key: g, amount: cents(lastYear.reduce((s, m) => s + groupTotal(m, g), 0)) })).filter((g) => g.amount > 0);
 
+    const who = person === null ? null : (people().find((p) => p.id === person) ?? null);
     return {
       today: todayDate,
       thisMonth,
+      period,
       month,
+      year: year ?? month.slice(0, 4),
+      span: { from: span[0], to: span[span.length - 1] },
       future,
+      current,
+      person: who,
+      people: people(),
       firstMonth: firstData,
-      accounts: accounts(),
-      selectedAccounts: accountIds ?? [],
+      accounts: mine,
+      selectedAccounts: picked.map((a) => a.id),
       budgets: plan,
       typical,
       months,
@@ -327,26 +403,25 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         spent: cents(spent),
         kept: cents(earned - spent),
         rate: earned > 0 ? Math.round(((earned - spent) / earned) * 1000) / 10 : null,
+        outlook,
         groups: groupRows,
         sources: sourceRows,
         moves: moveRows,
         pace,
-        biggest: future
-          ? []
-          : inMonth
-              .filter((t) => t.flow === 'out')
-              .sort((a, b) => a.amount - b.amount)
-              .slice(0, 6)
-              .map((t) => ({ id: t.id, posted: t.posted, amount: t.amount, name: nameOf(t), group: t.group, account: t.account })),
-        unsorted: inMonth.filter((t) => t.guessed && (t.group === 'other' || t.group === 'other_in')).length,
+        biggest: inSpan
+          .filter((t) => t.flow === 'out')
+          .sort((a, b) => a.amount - b.amount)
+          .slice(0, 6)
+          .map((t) => ({ id: t.id, posted: t.posted, amount: t.amount, name: nameOf(t), group: t.group, account: t.account })),
+        unsorted: inSpan.filter((t) => t.guessed && (t.group === 'other' || t.group === 'other_in')).length,
       },
       recurring,
       upcoming,
-      year: { from: year[0], to: year[year.length - 1], spent: yearSpent, earned: yearEarned },
+      last12: { from: lastYear[0], to: lastYear[lastYear.length - 1], spent: yearSpent, earned: yearEarned },
     };
   }
 
-  return { summary, budgets, setBudget, accounts };
+  return { summary, budgets, setBudget, accounts, people };
 }
 
 export type PersonalService = ReturnType<typeof personalService>;

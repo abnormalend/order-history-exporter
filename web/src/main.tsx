@@ -68,8 +68,10 @@ function App() {
     return onSignedOut(() => setAuth({ loading: false, setupNeeded: false, user: null }));
   }, [loadAuth]);
 
+  const member = auth.user?.role === 'member';
   useEffect(() => {
-    if (auth.user) loadMeta();
+    // A family member's login can't see the businesses' lists, so doesn't ask.
+    if (auth.user && auth.user.role !== 'member') loadMeta();
   }, [auth.user, loadMeta]);
 
   const signOut = async () => {
@@ -84,6 +86,22 @@ function App() {
         {error && <Banner>{error}</Banner>}
         {auth.setupNeeded ? <SetupScreen onDone={(user) => setAuth({ loading: false, setupNeeded: false, user })} /> : <SignIn onDone={(user) => setAuth({ loading: false, setupNeeded: false, user })} />}
       </>
+    );
+  }
+
+  const settings = <Settings user={auth.user} meta={meta} onUserChange={loadAuth} onSignedOut={() => setAuth({ loading: false, setupNeeded: false, user: null })} onMetaChange={loadMeta} />;
+  if (member) {
+    return (
+      <BusinessProvider entities={[]}>
+        <Layout username={auth.user.username} member onSignOut={signOut}>
+          {error && <Banner>{error}</Banner>}
+          <Routes>
+            <Route path="/personal" element={<Personal member />} />
+            <Route path="/settings" element={settings} />
+            <Route path="*" element={<Navigate to="/personal" replace />} />
+          </Routes>
+        </Layout>
+      </BusinessProvider>
     );
   }
 
@@ -111,7 +129,7 @@ function App() {
         <Route path="/items" element={<Items meta={meta} onMetaChange={loadMeta} />} />
         <Route path="/tax" element={<Tax meta={meta} forms={forms} onMetaChange={loadMeta} />} />
         <Route path="/year-end" element={<YearEnd meta={meta} forms={forms} />} />
-        <Route path="/settings" element={<Settings user={auth.user} meta={meta} onUserChange={loadAuth} onSignedOut={() => setAuth({ loading: false, setupNeeded: false, user: null })} onMetaChange={loadMeta} />} />
+        <Route path="/settings" element={settings} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Layout>

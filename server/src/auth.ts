@@ -12,6 +12,9 @@ export interface User {
   id: number;
   username: string;
   totpEnabled: boolean;
+  // The owner sees everything; a family member sees only their own money.
+  role: 'owner' | 'member';
+  personId: number | null;
 }
 
 /* ---------- Passwords ---------- */
@@ -107,23 +110,37 @@ const now = () => new Date().toISOString();
 
 export function createAuthStore(db: DatabaseSync) {
   const toUser = (row: Record<string, unknown> | undefined): User | null =>
-    row ? { id: Number(row.id), username: String(row.username), totpEnabled: Boolean(row.totp_secret) } : null;
+    row
+      ? { id: Number(row.id), username: String(row.username), totpEnabled: Boolean(row.totp_secret), role: row.role === 'member' ? 'member' : 'owner', personId: row.person_id == null ? null : Number(row.person_id) }
+      : null;
 
   return {
-    hasUsers(): boolean {
-      return Boolean(db.prepare('SELECT 1 FROM users LIMIT 1').get());
+    // What the web app is told about who's signed in.
+    describe(user: User) {
+      const person = user.personId === null ? null : (db.prepare('SELECT id, name FROM personal_people WHERE id = ?').get(user.personId) as { id: number; name: string } | undefined) ?? null;
+      return { username: user.username, totpEnabled: user.totpEnabled, role: user.role, person: person ? { id: Number(person.id), name: String(person.name) } : null };
     },
 
-    createUser(username: string, password: string): User {
+    hasUsers(): boolean {
+      return Boolean(db.prepare("SELECT 1 FROM users WHERE role = 'owner' LIMIT 1").get());
+    },
+
+    // The first user is the owner; others are family members tied to a person.
+    createUser(username: string, password: string, personId: number | null = null): User {
+      const role = personId === null ? 'owner' : 'member';
       const result = db
-        .prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)')
-        .run(username, hashPassword(password), now());
-      return { id: Number(result.lastInsertRowid), username, totpEnabled: false };
+        .prepare('INSERT INTO users (username, password_hash, created_at, role, person_id) VALUES (?, ?, ?, ?, ?)')
+        .run(username, hashPassword(password), now(), role, personId);
+      return { id: Number(result.lastInsertRowid), username, totpEnabled: false, role, personId };
     },
 
     // The full row, for checking a password or code. Never sent to the browser.
     record(username: string) {
       return db.prepare('SELECT * FROM users WHERE username = ?').get(username) as Record<string, any> | undefined;
+    },
+
+    userById(id: number): User | null {
+      return toUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id) as Record<string, unknown> | undefined);
     },
 
     recordById(id: number) {

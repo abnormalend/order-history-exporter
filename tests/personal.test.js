@@ -138,8 +138,8 @@ test('typical months, regular payments and the year come from the history', asyn
   assert.deepEqual(gig.map((r) => [r.day, r.amount]), [[3, 250], [25, 250]]);
   // A brokerage move is never a regular bill.
   assert.ok(!data.recurring.some((r) => r.group === 'invested'));
-  assert.equal(data.year.to, lastMonth);
-  assert.equal(data.year.earned.find((g) => g.key === 'pay').amount, 30000);
+  assert.equal(data.last12.to, lastMonth);
+  assert.equal(data.last12.earned.find((g) => g.key === 'pay').amount, 30000);
   // A year back and six months ahead.
   assert.equal(data.months.length, 19);
   assert.equal(data.months.filter((m) => m.future).length, 6);
@@ -173,4 +173,110 @@ test('accounts can be picked, and a bad month is refused', async () => {
   assert.ok(!data.detail.groups.find((g) => g.key === 'shopping').amount);
   assert.equal((await call('/api/personal?month=2026-1')).status, 400);
   assert.equal((await fetch(`${base}/api/personal`, { headers: { 'x-requested-with': 'expense-hub' } })).status, 401);
+});
+
+test("a business's account never shows in My money, even with a payment marked personal", async () => {
+  const csv = ['Date,Description,Amount', `${usDate(lastMonth, 4)},CHECK 1001,-171.68`, ''].join('\n');
+  await post('/api/bank/import', { content: csv, fileName: 'biz.csv', newAccount: { name: 'Business checking', kind: 'checking', owner: 'business' } });
+  const { transactions } = await get('/api/bank/transactions?preset=all&kind=all&q=CHECK%201001');
+  await post('/api/bank/transactions/update', { ids: [transactions[0].id], status: 'personal' });
+  const data = await get(`/api/personal?month=${lastMonth}`);
+  assert.ok(!data.accounts.some((a) => a.name === 'Business checking'));
+  assert.equal(data.detail.spent, 2465.99);
+});
+
+test('a whole year adds up its months, with the rest of it forecast', async () => {
+  const year = thisMonth.slice(0, 4);
+  const data = await get(`/api/personal?year=${year}`);
+  assert.equal(data.period, 'year');
+  assert.deepEqual(data.span, { from: `${year}-01`, to: `${year}-12` });
+  assert.equal(data.current, true);
+  assert.equal(data.detail.pace.unit, 'month');
+  assert.equal(data.detail.pace.days, 12);
+  // Each complete month this year brought in 5,500; this month nothing yet.
+  const past = [1, 2, 3, 4, 5, 6].map((i) => addMonths(thisMonth, -i)).filter((m) => m.startsWith(year)).length;
+  assert.equal(data.detail.earned, 5500 * past);
+  assert.ok(data.detail.outlook.earned > data.detail.earned, 'the months ahead add expected pay');
+  assert.equal(data.detail.groups.find((g) => g.key === 'home').typical, 24000);
+
+  const before = await get(`/api/personal?year=${Number(year) - 1}`);
+  assert.equal(before.current, false);
+  assert.equal(before.detail.outlook, null);
+  const ahead = await get(`/api/personal?year=${Number(year) + 1}`);
+  assert.equal(ahead.future, true);
+  assert.equal(ahead.detail.earned, 5500 * 12);
+  assert.equal((await call('/api/personal?year=26')).status, 400);
+});
+
+test('family members have their own accounts and budgets, and a login that sees only theirs', async () => {
+  const { accounts } = await get('/api/bank/accounts');
+  const cardId = accounts.find((a) => a.name === 'Rewards card').id;
+  const { id: kid, accounts: choices } = await post('/api/people', { name: 'Kid Example' });
+  // A business's account can't be given to anyone.
+  assert.ok(!choices.some((a) => a.name === 'Business checking'));
+  await assert.rejects(post(`/api/people/${kid}`, { accounts: [accounts.find((a) => a.name === 'Business checking').id] }), { status: 400 });
+  await post(`/api/people/${kid}`, { accounts: [cardId] });
+  await assert.rejects(post('/api/people', { name: 'kid example' }), { status: 409 });
+
+  // The card leaves the owner's money and becomes the kid's.
+  const mine = await get(`/api/personal?month=${lastMonth}`);
+  assert.ok(!mine.accounts.some((a) => a.id === cardId));
+  assert.equal(mine.detail.spent, 2365.99);
+  assert.deepEqual(mine.people, [{ id: kid, name: 'Kid Example' }]);
+  const theirs = await get(`/api/personal?month=${lastMonth}&person=${kid}`);
+  assert.deepEqual(theirs.person, { id: kid, name: 'Kid Example' });
+  assert.deepEqual(theirs.accounts.map((a) => a.id), [cardId]);
+  assert.equal(theirs.detail.spent, 100);
+  assert.equal((await call('/api/personal?person=999')).status, 404);
+
+  // Budgets are each person's own.
+  await post('/api/personal/budgets', { group: 'shopping', monthly: 150, person: kid });
+  assert.deepEqual((await get(`/api/personal?person=${kid}`)).budgets, { shopping: 150 });
+  assert.deepEqual((await get('/api/personal')).budgets, {});
+
+  // A login for them; usernames are unique, the owner's included.
+  await post(`/api/people/${kid}/login`, { username: 'kid', password: 'kid test password' });
+  await assert.rejects(post(`/api/people/${kid}/login`, { username: 'kid2', password: 'kid test password' }), { status: 409 });
+  const other = await post('/api/people', { name: 'Other Example' });
+  await assert.rejects(post(`/api/people/${other.id}/login`, { username: 'OWNER', password: 'kid test password' }), { status: 409 });
+  const signIn = async (password) => {
+    const response = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'expense-hub' },
+      body: JSON.stringify({ username: 'kid', password }),
+    });
+    return { response, cookie: response.headers.get('set-cookie')?.split(';')[0], body: await response.json() };
+  };
+  const session = await signIn('kid test password');
+  assert.equal(session.response.status, 200);
+  assert.deepEqual(session.body.user, { username: 'kid', totpEnabled: false, role: 'member', person: { id: kid, name: 'Kid Example' } });
+  const asKid = (route, options = {}) =>
+    fetch(`${base}${route}`, { ...options, headers: { cookie: session.cookie, 'x-requested-with': 'expense-hub', ...(options.body ? { 'content-type': 'application/json' } : {}) } });
+
+  // Their own money only: asking for the owner's, or someone else's account, still gets theirs.
+  for (const route of [`/api/personal?month=${lastMonth}`, `/api/personal?month=${lastMonth}&person=me`, `/api/personal?month=${lastMonth}&accounts=${checkingId}`]) {
+    const data = await (await asKid(route)).json();
+    assert.deepEqual(data.accounts.map((a) => a.id), [cardId], route);
+    assert.deepEqual(data.people, []);
+    assert.equal(data.detail.spent, 100);
+  }
+  // Nothing else: not the books, the settings, other people, or budgets.
+  for (const route of ['/api/bank/accounts', '/api/bank/transactions', '/api/settings/token', '/api/people', '/api/entities', '/api/status']) {
+    assert.equal((await asKid(route)).status, 403, route);
+  }
+  assert.equal((await asKid('/api/personal/budgets', { method: 'POST', body: JSON.stringify({ group: 'food', monthly: 1 }) })).status, 403);
+  assert.equal((await asKid(`/api/people/${kid}/delete`, { method: 'POST', body: '{}' })).status, 403);
+  assert.equal((await asKid('/api/auth/state')).status, 200);
+
+  // A reset by the owner signs them out.
+  await post(`/api/people/${kid}/login/password`, { password: 'a new kid password' });
+  assert.equal((await asKid('/api/personal')).status, 401);
+  assert.equal((await signIn('kid test password')).response.status, 401);
+  assert.equal((await signIn('a new kid password')).response.status, 200);
+
+  // Removing the person gives the card back and removes the login.
+  const left = await post(`/api/people/${kid}/delete`);
+  assert.ok(!left.people.some((p) => p.id === kid));
+  assert.ok((await get('/api/personal')).accounts.some((a) => a.id === cardId));
+  assert.equal((await signIn('a new kid password')).response.status, 401);
 });

@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 24;
+const SCHEMA_VERSION = 25;
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -586,6 +586,30 @@ const SCHEMA_V17 = `
 // A business that has closed keeps its history, marked with the day it closed. And
 // what each business reported on its tax return, line by line, to compare with what
 // Business Hub has for the same year.
+// Family members with their own accounts and budgets in My money, and logins that see
+// only their own money. An account or login with no person is the owner's; budgets
+// for the owner are person 0.
+const SCHEMA_V25 = `
+  CREATE TABLE personal_people (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_at TEXT NOT NULL
+  );
+  ALTER TABLE bank_accounts ADD COLUMN person_id INTEGER;
+  ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'owner';
+  ALTER TABLE users ADD COLUMN person_id INTEGER;
+  CREATE TABLE personal_budgets_new (
+    person_id INTEGER NOT NULL DEFAULT 0,
+    group_key TEXT NOT NULL,
+    monthly REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (person_id, group_key)
+  );
+  INSERT INTO personal_budgets_new (person_id, group_key, monthly, updated_at) SELECT 0, group_key, monthly, updated_at FROM personal_budgets;
+  DROP TABLE personal_budgets;
+  ALTER TABLE personal_budgets_new RENAME TO personal_budgets;
+`;
+
 // A monthly budget for each kind of personal spending.
 const SCHEMA_V24 = `
   CREATE TABLE personal_budgets (
@@ -862,6 +886,7 @@ function migrate(db, file) {
     if (version < 22) db.exec(SCHEMA_V22);
     if (version < 23) db.exec(SCHEMA_V23);
     if (version < 24) db.exec(SCHEMA_V24);
+    if (version < 25) db.exec(SCHEMA_V25);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

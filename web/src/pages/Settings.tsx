@@ -9,6 +9,7 @@ import { TAX_FORM_LABELS } from '../business';
 import { Banner, Button, Card, Confirm, Field, Input, PageHeader, Select } from '../ui';
 import type { Meta } from '../filters';
 import type { SignedInUser } from './SignIn';
+import { FamilyCard } from '../family';
 
 function PasswordCard({ onSignedOut }: { onSignedOut: () => void }) {
   const [form, setForm] = useState({ current: '', next: '', confirm: '' });
@@ -638,6 +639,17 @@ function HospitableCard() {
 }
 
 export function Settings({ user, meta, onUserChange, onSignedOut, onMetaChange }: { user: SignedInUser; meta: Meta | null; onUserChange: () => void; onSignedOut: () => void; onMetaChange: () => void }) {
+  // A family member's login: only their own sign-in settings.
+  if (user.role === 'member')
+    return (
+      <>
+        <PageHeader title="Settings" description={`Signed in as ${user.username}.`} />
+        <div className="grid gap-5 lg:grid-cols-2">
+          <PasswordCard onSignedOut={onSignedOut} />
+          <TwoFactorCard user={user} onChange={onUserChange} />
+        </div>
+      </>
+    );
   return (
     <>
       <PageHeader title="Settings" description={`Signed in as ${user.username}.`} />
@@ -649,6 +661,7 @@ export function Settings({ user, meta, onUserChange, onSignedOut, onMetaChange }
         <PasswordCard onSignedOut={onSignedOut} />
         <EntitiesCard entities={meta?.entities || []} onChange={onMetaChange} />
         <PlacesCard onChange={onMetaChange} entities={meta?.entities || []} />
+        <FamilyCard />
       </div>
     </>
   );

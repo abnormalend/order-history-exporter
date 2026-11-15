@@ -101,6 +101,7 @@ interface TxRow {
 interface GroupRow {
   key: string;
   amount: number;
+  projected: number;
   budget: number | null;
   typical: number;
   typicalSoFar: number | null;
@@ -111,8 +112,14 @@ interface GroupRow {
 interface PersonalData {
   today: string;
   thisMonth: string;
+  period: 'month' | 'year';
   month: string;
+  year: string;
+  span: { from: string; to: string };
   future: boolean;
+  current: boolean;
+  person: { id: number; name: string } | null;
+  people: { id: number; name: string }[];
   firstMonth: string;
   accounts: { id: number; name: string; institution: string | null; kind: string; balance: number | null; balanceDate: string | null; transactions: number }[];
   selectedAccounts: number[];
@@ -125,16 +132,17 @@ interface PersonalData {
     spent: number;
     kept: number;
     rate: number | null;
+    outlook: { earned: number; spent: number } | null;
     groups: GroupRow[];
     sources: { key: string; amount: number; count: number; payers: { name: string; amount: number; count: number }[] }[];
     moves: { key: string; amount: number }[];
-    pace: { days: number; actual: number[]; typical: number[]; budget: number | null };
+    pace: { unit: 'day' | 'month'; days: number; actual: number[]; typical: number[]; budget: number | null };
     biggest: { id: number; posted: string; amount: number; name: string; group: string; account: string }[];
     unsorted: number;
   };
   recurring: { key: string; name: string; flow: string; group: string; amount: number; day: number; months: number; paidThisMonth: boolean }[];
   upcoming: { name: string; flow: string; group: string; amount: number; on: string }[];
-  year: { from: string; to: string; spent: { key: string; amount: number }[]; earned: { key: string; amount: number }[] };
+  last12: { from: string; to: string; spent: { key: string; amount: number }[]; earned: { key: string; amount: number }[] };
 }
 
 const monthName = (m: string, short = false) => {
@@ -154,104 +162,180 @@ const dayLabel = (date: string) => {
   const [, m, d] = date.split('-').map(Number);
   return `${MONTHS[m - 1]} ${d}`;
 };
+// "November 2026", or "2026" for a year.
+const spanName = (data: PersonalData, short = false) => (data.period === 'year' ? data.year : monthName(data.month, short));
 
-export function Personal() {
+// Who is looking: the owner can see anyone's money and change budgets; a family
+// member's login sees only their own, read-only.
+export function Personal({ member = false }: { member?: boolean }) {
   const [params, setParams] = useSearchParams();
-  const month = params.get('month') || '';
-  const accounts = params.get('accounts') || '';
   const query = new URLSearchParams();
-  if (month) query.set('month', month);
-  if (accounts) query.set('accounts', accounts);
+  for (const key of ['month', 'year', 'accounts', 'person']) {
+    const value = params.get(key);
+    if (value) query.set(key, value);
+  }
   const { data, error, loading, reload } = useApi<PersonalData>(`/api/personal${query.size ? `?${query}` : ''}`);
   const [open, setOpen] = useState<string | null>(null);
 
-  const setParam = (key: string, value: string | null) => {
+  const change = (values: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
-    if (value) next.set(key, value);
-    else next.delete(key);
+    for (const [key, value] of Object.entries(values)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    }
+    setOpen(null);
     setParams(next, { replace: true });
   };
-  const pick = (m: string) => {
-    setOpen(null);
-    setParam('month', data && m === data.thisMonth ? null : m);
-  };
-  const chosen = accounts ? accounts.split(',').map(Number) : [];
+  // A month, or a whole year.
+  const pick = (m: string) => change({ month: data && m === data.thisMonth ? null : m, year: null });
+  const pickYear = (y: string) => change({ year: y, month: null });
+  const chosen = (params.get('accounts') || '').split(',').filter(Boolean).map(Number);
   const toggleAccount = (id: number) => {
     const next = chosen.includes(id) ? chosen.filter((x) => x !== id) : [...chosen, id];
-    setParam('accounts', next.length ? next.join(',') : null);
+    change({ accounts: next.length ? next.join(',') : null });
   };
 
   if (error) return <Banner>{error.message}</Banner>;
   if (!data) return loading ? <Loading /> : null;
   const d = data.detail;
-  const shown = data.month;
+  const { from, to } = data.span;
 
   return (
     <>
-      <Hero data={data} onPick={pick} chosen={chosen} onToggle={toggleAccount} onAll={() => setParam('accounts', null)} />
+      <Hero
+        data={data}
+        member={member}
+        onPick={pick}
+        onPickYear={pickYear}
+        onPerson={(id) => change({ person: id === null ? null : String(id), accounts: null })}
+        chosen={chosen}
+        onToggle={toggleAccount}
+        onAll={() => change({ accounts: null })}
+      />
       {d.unsorted > 0 && !data.future && (
         <Banner tone="info">
-          {plural(d.unsorted, 'payment')} in {monthName(shown)} couldn't be sorted from the bank's description.{' '}
-          <Link className="font-medium underline" to={`/transactions?status=personal&preset=custom&from=${shown}-01&to=${shown}-31`}>
-            Give them a category
-          </Link>{' '}
-          and they'll land in the right group.
+          {plural(d.unsorted, 'payment')} in {spanName(data)} couldn't be sorted from the bank's description.{' '}
+          {member ? (
+            'Ask for a category to be given to them and they will land in the right group.'
+          ) : (
+            <>
+              <Link className="font-medium underline" to={`/transactions?status=personal&preset=custom&from=${from}-01&to=${to}-31`}>
+                Give them a category
+              </Link>{' '}
+              and they'll land in the right group.
+            </>
+          )}
         </Banner>
       )}
-      <Timeline months={data.months} selected={shown} today={data.today} onPick={pick} />
+      <Timeline months={data.months} span={data.span} today={data.today} onPick={pick} />
       <div className="mb-5 grid gap-5 lg:grid-cols-[1.25fr_1fr]">
-        <WhereItWent data={data} open={open} onOpen={setOpen} />
+        <WhereItWent data={data} open={open} onOpen={setOpen} member={member} />
         <div className="grid content-start gap-5">
           <WhereItCame data={data} />
           <Moved data={data} />
         </div>
       </div>
-      <Budgets data={data} onChange={reload} />
+      <Budgets data={data} onChange={reload} readOnly={member} />
       <div className="mb-5 grid gap-5 lg:grid-cols-2">
         <Pace data={data} />
         <ComingUp data={data} />
       </div>
       <div className="mb-5 grid gap-5 lg:grid-cols-2">
-        <Biggest data={data} />
+        <Biggest data={data} member={member} />
         <YourYear data={data} />
       </div>
     </>
   );
 }
 
-/* ---------- The top: month, accounts, and what was kept ---------- */
+/* ---------- The top: whose money, which month or year, and what was kept ---------- */
 
-function Hero({ data, onPick, chosen, onToggle, onAll }: { data: PersonalData; onPick: (m: string) => void; chosen: number[]; onToggle: (id: number) => void; onAll: () => void }) {
+function Hero({
+  data,
+  member,
+  onPick,
+  onPickYear,
+  onPerson,
+  chosen,
+  onToggle,
+  onAll,
+}: {
+  data: PersonalData;
+  member: boolean;
+  onPick: (m: string) => void;
+  onPickYear: (y: string) => void;
+  onPerson: (id: number | null) => void;
+  chosen: number[];
+  onToggle: (id: number) => void;
+  onAll: () => void;
+}) {
   const d = data.detail;
   const forecast = data.future;
-  const current = data.month === data.thisMonth;
+  const yearly = data.period === 'year';
+  const current = data.current;
+  const thisYear = data.thisMonth.slice(0, 4);
   const kept = d.kept;
-  const rate = d.rate;
-  const row = data.months.find((m) => m.current);
-  const outlook = row && row.projectedEarned !== null && row.projectedSpent !== null ? row.projectedEarned - row.projectedSpent : null;
+  const outlook = d.outlook ? d.outlook.earned - d.outlook.spent : null;
+  const step = (n: number) => (yearly ? onPickYear(String(Number(data.year) + n)) : onPick(shiftMonth(data.month, n)));
+  const whose = !member && data.person ? `${data.person.name}'s money` : 'My money';
   return (
     <section className="relative mb-5 overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-600 via-teal-700 to-indigo-800 p-5 text-white shadow-lg sm:p-7">
       <div aria-hidden className="pointer-events-none absolute -top-24 -right-16 size-72 rounded-full bg-white/10 blur-2xl" />
       <div aria-hidden className="pointer-events-none absolute -bottom-28 left-1/3 size-72 rounded-full bg-emerald-300/20 blur-3xl" />
+      {!member && data.people.length > 0 && (
+        <div className="relative mb-4 flex flex-wrap items-center gap-1.5" role="group" aria-label="Whose money">
+          <Users className="mr-1 size-4 text-emerald-100" aria-hidden />
+          <Chip active={data.person === null} onClick={() => onPerson(null)}>
+            Me
+          </Chip>
+          {data.people.map((p) => (
+            <Chip key={p.id} active={data.person?.id === p.id} onClick={() => onPerson(p.id)}>
+              {p.name}
+            </Chip>
+          ))}
+          <Link to="/settings#family" className="ml-1 text-xs text-emerald-100 underline-offset-2 hover:underline">
+            Manage
+          </Link>
+        </div>
+      )}
       <div className="relative flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="text-sm font-medium tracking-wide text-emerald-100 uppercase">My money</p>
-          <div className="mt-1 flex items-center gap-2">
-            <button type="button" aria-label="Month before" onClick={() => onPick(shiftMonth(data.month, -1))} className="rounded-full p-1.5 hover:bg-white/15">
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm font-medium tracking-wide text-emerald-100 uppercase">{whose}</p>
+            <div className="inline-flex rounded-full bg-white/10 p-0.5 text-xs font-medium" role="group" aria-label="Month or year">
+              <button type="button" aria-pressed={!yearly} onClick={() => !yearly || onPick(current ? data.thisMonth : `${data.year}-${data.thisMonth.slice(5)}`)} className={cx('rounded-full px-3 py-1', !yearly ? 'bg-white text-teal-800 shadow' : 'hover:bg-white/15')}>
+                Month
+              </button>
+              <button type="button" aria-pressed={yearly} onClick={() => yearly || onPickYear(data.month.slice(0, 4))} className={cx('rounded-full px-3 py-1', yearly ? 'bg-white text-teal-800 shadow' : 'hover:bg-white/15')}>
+                Year
+              </button>
+            </div>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <button type="button" aria-label={yearly ? 'Year before' : 'Month before'} onClick={() => step(-1)} className="rounded-full p-1.5 hover:bg-white/15">
               <ChevronLeft className="size-5" aria-hidden />
             </button>
-            <h1 className="min-w-[11ch] text-center text-2xl font-semibold tracking-tight sm:text-3xl">{monthName(data.month)}</h1>
-            <button type="button" aria-label="Month after" onClick={() => onPick(shiftMonth(data.month, 1))} className="rounded-full p-1.5 hover:bg-white/15">
+            <h1 className={cx('text-center text-2xl font-semibold tracking-tight sm:text-3xl', yearly ? 'min-w-[5ch]' : 'min-w-[11ch]')}>{spanName(data)}</h1>
+            <button type="button" aria-label={yearly ? 'Year after' : 'Month after'} onClick={() => step(1)} className="rounded-full p-1.5 hover:bg-white/15">
               <ChevronRight className="size-5" aria-hidden />
             </button>
-            {!current && (
-              <button type="button" onClick={() => onPick(data.thisMonth)} className="ml-1 rounded-full bg-white/15 px-3 py-1 text-xs font-medium hover:bg-white/25">
+            {!(yearly && current) && (
+              <button type="button" onClick={() => onPickYear(thisYear)} className="rounded-full bg-white/15 px-3 py-1 text-xs font-medium hover:bg-white/25">
+                This year
+              </button>
+            )}
+            {!(!yearly && current) && (
+              <button type="button" onClick={() => onPick(data.thisMonth)} className="rounded-full bg-white/15 px-3 py-1 text-xs font-medium hover:bg-white/25">
                 This month
               </button>
             )}
           </div>
           <p className="mt-1 text-sm text-emerald-50/90">
-            {forecast ? 'A forecast from your regular paychecks and bills, and your budgets or typical months.' : current ? `So far this month, to ${dayLabel(data.today)}.` : 'Your personal accounts, without transfers between them.'}
+            {forecast
+              ? 'A forecast from regular paychecks and bills, and budgets or typical months.'
+              : current
+                ? `So far this ${yearly ? 'year' : 'month'}, to ${dayLabel(data.today)}.`
+                : 'Personal accounts, without transfers between them.'}
           </p>
         </div>
         <div className="flex max-w-full flex-wrap gap-1.5" role="group" aria-label="Accounts included">
@@ -267,24 +351,37 @@ function Hero({ data, onPick, chosen, onToggle, onAll }: { data: PersonalData; o
         </div>
       </div>
 
-      <div className="relative mt-6 grid items-center gap-6 sm:grid-cols-[auto_1fr]">
-        <Ring rate={rate} />
-        <div>
-          <p className="text-sm text-emerald-50/90">{forecast ? 'You could keep' : kept >= 0 ? 'You kept' : 'You spent more than came in, by'}</p>
-          <p className="text-4xl font-bold tracking-tight tabular-nums sm:text-5xl">{wholeMoney(Math.abs(kept))}</p>
-          {current && outlook !== null && (
-            <p className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 text-sm">
-              <TrendingUp className="size-4" aria-hidden />
-              {outlook >= 0 ? `On track to keep ${wholeMoney(outlook)} by the end of ${monthName(data.month, true)}` : `On track to spend ${wholeMoney(-outlook)} more than comes in`}
-            </p>
+      {!data.accounts.length ? (
+        <p className="relative mt-6 rounded-xl bg-white/10 px-4 py-3 text-sm">
+          No accounts here yet.{' '}
+          {!member && (
+            <Link to="/settings#family" className="font-medium underline">
+              Choose {data.person ? `${data.person.name}'s` : 'whose'} accounts in Settings
+            </Link>
           )}
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <HeroStat label={forecast ? 'Expected in' : 'Money in'} value={d.earned} tone="in" />
-            <HeroStat label={forecast ? 'Expected out' : 'Money out'} value={d.spent} tone="out" />
-            <HeroStat label="Moved to savings & businesses" value={-d.moves.filter((m) => m.key === 'invested' || m.key === 'business').reduce((s, m) => s + m.amount, 0)} tone="move" />
+        </p>
+      ) : (
+        <div className="relative mt-6 grid items-center gap-6 sm:grid-cols-[auto_1fr]">
+          <Ring rate={d.rate} />
+          <div>
+            <p className="text-sm text-emerald-50/90">{forecast ? 'Could keep' : kept >= 0 ? 'Kept' : 'Spent more than came in, by'}</p>
+            <p className="text-4xl font-bold tracking-tight tabular-nums sm:text-5xl">{wholeMoney(Math.abs(kept))}</p>
+            {current && outlook !== null && (
+              <p className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 text-sm">
+                <TrendingUp className="size-4" aria-hidden />
+                {outlook >= 0
+                  ? `On track to keep ${wholeMoney(outlook)} by the end of ${yearly ? data.year : monthName(data.month, true)}`
+                  : `On track to spend ${wholeMoney(-outlook)} more than comes in`}
+              </p>
+            )}
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <HeroStat label={forecast ? 'Expected in' : 'Money in'} value={d.earned} tone="in" />
+              <HeroStat label={forecast ? 'Expected out' : 'Money out'} value={d.spent} tone="out" />
+              <HeroStat label="Moved to savings & businesses" value={-d.moves.filter((m) => m.key === 'invested' || m.key === 'business').reduce((s, m) => s + m.amount, 0)} tone="move" />
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }
@@ -341,7 +438,8 @@ function Ring({ rate }: { rate: number | null }) {
 
 /* ---------- Month by month, back and ahead ---------- */
 
-function Timeline({ months, selected, today, onPick }: { months: MonthRow[]; selected: string; today: string; onPick: (m: string) => void }) {
+function Timeline({ months, span, today, onPick }: { months: MonthRow[]; span: { from: string; to: string }; today: string; onPick: (m: string) => void }) {
+  const inSpan = (m: string) => m >= span.from && m <= span.to;
   const W = 56;
   const H = 210;
   const top = 18;
@@ -397,7 +495,7 @@ function Timeline({ months, selected, today, onPick }: { months: MonthRow[]; sel
           <line x1={0} x2={width} y1={base} y2={base} className="stroke-slate-300 dark:stroke-slate-700" />
           {months.map((m, i) => {
             const x = i * W;
-            const isSel = m.month === selected;
+            const isSel = inSpan(m.month);
             const earned = m.future ? m.projectedEarned ?? 0 : m.earned;
             const spent = m.future ? m.projectedSpent ?? 0 : m.spent;
             const bw = 17;
@@ -437,7 +535,7 @@ function Timeline({ months, selected, today, onPick }: { months: MonthRow[]; sel
           />
           <polyline points={keptPoints.map((p) => p.join(',')).join(' ')} fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinejoin="round" pointerEvents="none" />
           {keptPoints.map(([px, py], i) => (
-            <circle key={i} cx={px} cy={py} r={months[i].month === selected ? 4.5 : 3} fill={months[i].future || months[i].current ? 'white' : '#6366f1'} stroke="#6366f1" strokeWidth="2" pointerEvents="none" />
+            <circle key={i} cx={px} cy={py} r={inSpan(months[i].month) ? 4.5 : 3} fill={months[i].future || months[i].current ? 'white' : '#6366f1'} stroke="#6366f1" strokeWidth="2" pointerEvents="none" />
           ))}
           {todayIndex >= 0 && (
             <text x={(todayIndex + 1) * W + 6} y={14} className="fill-slate-500 text-[10px] font-medium dark:fill-slate-400">
@@ -464,7 +562,7 @@ function Legend({ colour, line, children }: { colour: string; line?: boolean; ch
 
 /* ---------- Where it went ---------- */
 
-function WhereItWent({ data, open, onOpen }: { data: PersonalData; open: string | null; onOpen: (g: string | null) => void }) {
+function WhereItWent({ data, open, onOpen, member }: { data: PersonalData; open: string | null; onOpen: (g: string | null) => void; member: boolean }) {
   const groups = data.detail.groups.filter((g) => g.amount > 0.5).sort((a, b) => b.amount - a.amount);
   const total = groups.reduce((s, g) => s + g.amount, 0);
   const selected = groups.find((g) => g.key === open) ?? null;
@@ -506,7 +604,7 @@ function WhereItWent({ data, open, onOpen }: { data: PersonalData; open: string 
           </ul>
         </div>
       )}
-      {selected && <GroupDetail group={selected} future={data.future} onClose={() => onOpen(null)} />}
+      {selected && <GroupDetail group={selected} future={data.future} member={member} onClose={() => onOpen(null)} />}
     </Card>
   );
 }
@@ -552,7 +650,7 @@ function Donut({ slices, total, active, onPick, label }: { slices: { key: string
   );
 }
 
-function GroupDetail({ group, future, onClose }: { group: GroupRow; future: boolean; onClose: () => void }) {
+function GroupDetail({ group, future, member, onClose }: { group: GroupRow; future: boolean; member: boolean; onClose: () => void }) {
   const gi = info(group.key);
   return (
     <div className="mt-5 rounded-xl border p-4" style={{ borderColor: `${gi.colour}66`, background: `${gi.colour}0d` }}>
@@ -564,7 +662,7 @@ function GroupDetail({ group, future, onClose }: { group: GroupRow; future: bool
       </div>
       {future ? (
         <p className="text-sm text-slate-600 dark:text-slate-300">
-          {group.budget !== null ? `Your budget of ${wholeMoney(group.budget)}.` : `A typical month: ${wholeMoney(group.typical)}.`}
+          {group.budget !== null ? `The budget: ${wholeMoney(group.budget)}.` : `Typical: ${wholeMoney(group.typical)}.`}
         </p>
       ) : (
         <>
@@ -582,18 +680,33 @@ function GroupDetail({ group, future, onClose }: { group: GroupRow; future: bool
             {group.transactions.map((t) => (
               <li key={t.id} className="flex items-center gap-3 py-1.5">
                 <span className="w-12 shrink-0 text-xs text-slate-500">{dayLabel(t.posted)}</span>
-                <Link to={`/transactions?id=${t.id}&preset=all&kind=all`} className="min-w-0 flex-1 truncate hover:underline" title={t.description}>
+                <TxName id={t.id} member={member} className="min-w-0 flex-1 truncate" title={t.description}>
                   {t.name}
                   <span className="ml-1.5 text-xs text-slate-400">{t.account}</span>
-                </Link>
+                </TxName>
                 <span className={cx('tabular-nums', t.amount > 0 && 'text-emerald-600')}>{money(-t.amount)}</span>
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Something in the wrong group? Open it and give it a category; the group follows the category.</p>
+          {!member && <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Something in the wrong group? Open it and give it a category; the group follows the category.</p>}
         </>
       )}
     </div>
+  );
+}
+
+// A transaction's name: a link to it for the owner, plain text for a family login.
+function TxName({ id, member, className, title, children }: { id: number; member: boolean; className: string; title?: string; children: ReactNode }) {
+  if (member)
+    return (
+      <span className={className} title={title}>
+        {children}
+      </span>
+    );
+  return (
+    <Link to={`/transactions?id=${id}&preset=all&kind=all`} className={cx(className, 'hover:underline')} title={title}>
+      {children}
+    </Link>
   );
 }
 
@@ -662,12 +775,16 @@ function Moved({ data }: { data: PersonalData }) {
 
 /* ---------- Budgets ---------- */
 
-function Budgets({ data, onChange }: { data: PersonalData; onChange: () => void }) {
+function Budgets({ data, onChange, readOnly }: { data: PersonalData; onChange: () => void; readOnly: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const d = data.detail;
-  const current = data.month === data.thisMonth;
-  const dayShare = current ? Number(data.today.slice(8, 10)) / d.pace.days : data.future ? 0 : 1;
+  const yearly = data.period === 'year';
+  // How far through the month (or year) today is.
+  const dayOfMonth = Number(data.today.slice(8, 10));
+  const daysThisMonth = new Date(Date.UTC(Number(data.thisMonth.slice(0, 4)), Number(data.thisMonth.slice(5)), 0)).getUTCDate();
+  const dayShare = !data.current ? (data.future ? 0 : 1) : yearly ? (Number(data.thisMonth.slice(5)) - 1 + dayOfMonth / daysThisMonth) / 12 : dayOfMonth / d.pace.days;
+  const person = data.person?.id ?? null;
   const rows = d.groups.filter((g) => g.key !== 'other' && (g.amount > 0 || g.budget !== null || g.typical > 0));
   const missing = rows.filter((g) => g.budget === null && g.typical > 0);
   const totalBudget = rows.reduce((s, g) => s + (g.budget ?? 0), 0);
@@ -677,7 +794,7 @@ function Budgets({ data, onChange }: { data: PersonalData; onChange: () => void 
     setBusy(true);
     setError('');
     try {
-      await post('/api/personal/budgets', { group, monthly });
+      await post('/api/personal/budgets', { group, monthly, person });
       onChange();
     } catch (e) {
       setError((e as Error).message);
@@ -688,7 +805,7 @@ function Budgets({ data, onChange }: { data: PersonalData; onChange: () => void 
     setBusy(true);
     setError('');
     try {
-      for (const g of missing) await post('/api/personal/budgets', { group: g.key, monthly: Math.ceil(g.typical / 10) * 10 });
+      for (const g of missing) await post('/api/personal/budgets', { group: g.key, monthly: Math.ceil(data.typical[g.key] / 10) * 10, person });
       onChange();
     } catch (e) {
       setError((e as Error).message);
@@ -710,7 +827,7 @@ function Budgets({ data, onChange }: { data: PersonalData; onChange: () => void 
       }
       className="mb-5"
       actions={
-        missing.length > 0 ? (
+        missing.length > 0 && !readOnly ? (
           <Button busy={busy} onClick={fromTypical}>
             <Sparkles className="size-4" aria-hidden />
             Suggest from typical months
@@ -720,22 +837,42 @@ function Budgets({ data, onChange }: { data: PersonalData; onChange: () => void 
     >
       {error && <Banner>{error}</Banner>}
       {!rows.length ? (
-        <p className="py-4 text-center text-sm text-slate-500">Once there's some spending, set a monthly budget for each kind here.</p>
+        <p className="py-4 text-center text-sm text-slate-500">{readOnly ? 'No budgets yet.' : "Once there's some spending, set a monthly budget for each kind here."}</p>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {rows.map((g) => (
-            <Envelope key={g.key} group={g} dayShare={dayShare} future={data.future} busy={busy} onSave={(n) => save(g.key, n)} />
+            <Envelope key={g.key} group={g} monthly={data.budgets[g.key] ?? null} typicalMonth={data.typical[g.key] ?? 0} yearly={yearly} readOnly={readOnly} dayShare={dayShare} future={data.future} busy={busy} onSave={(n) => save(g.key, n)} />
           ))}
         </div>
       )}
-      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">The tick on each bar is where you'd usually be by today, counting bills that land on set days. A typical month is the middle of your last six.</p>
+      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">{yearly ? 'Budgets are set by the month; the year adds up twelve. ' : ''}The tick on each bar is where you'd usually be by today, counting bills that land on set days. A typical month is the middle of your last six.</p>
     </Card>
   );
 }
 
-function Envelope({ group, dayShare, future, busy, onSave }: { group: GroupRow; dayShare: number; future: boolean; busy: boolean; onSave: (n: number | null) => void }) {
+function Envelope({
+  group,
+  monthly,
+  typicalMonth,
+  yearly,
+  readOnly,
+  dayShare,
+  future,
+  busy,
+  onSave,
+}: {
+  group: GroupRow;
+  monthly: number | null;
+  typicalMonth: number;
+  yearly: boolean;
+  readOnly: boolean;
+  dayShare: number;
+  future: boolean;
+  busy: boolean;
+  onSave: (n: number | null) => void;
+}) {
   const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(group.budget ? String(group.budget) : '');
+  const [value, setValue] = useState(monthly ? String(monthly) : '');
   const gi = info(group.key);
   const I = gi.icon;
   const budget = group.budget;
@@ -755,9 +892,13 @@ function Envelope({ group, dayShare, future, busy, onSave }: { group: GroupRow; 
         </span>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold">{gi.label}</div>
-          <div className="text-xs text-slate-500 dark:text-slate-400">typical {wholeMoney(group.typical)}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400">
+            typical {wholeMoney(group.typical)}
+            {yearly ? ' a year' : ''}
+            {yearly && monthly !== null ? ` · ${wholeMoney(monthly)} a month` : ''}
+          </div>
         </div>
-        {!editing && (
+        {!editing && !readOnly && (
           <button type="button" onClick={() => setEditing(true)} className="rounded p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label={`Set the ${gi.label} budget`}>
             <Pencil className="size-3.5" aria-hidden />
           </button>
@@ -774,7 +915,8 @@ function Envelope({ group, dayShare, future, busy, onSave }: { group: GroupRow; 
           }}
         >
           <span className="text-sm text-slate-500">$</span>
-          <Input inputMode="decimal" autoFocus value={value} onChange={(e) => setValue(e.target.value.replace(/[^\d.]/g, ''))} placeholder={String(Math.ceil(group.typical / 10) * 10 || '')} aria-label="Monthly budget" />
+          <Input inputMode="decimal" autoFocus value={value} onChange={(e) => setValue(e.target.value.replace(/[^\d.]/g, ''))} placeholder={String(Math.ceil(typicalMonth / 10) * 10 || '')} aria-label="Monthly budget" />
+          <span className="shrink-0 text-xs text-slate-500">a month</span>
           <Button type="submit" disabled={busy} aria-label="Save">
             <Check className="size-4" aria-hidden />
           </Button>
@@ -786,7 +928,7 @@ function Envelope({ group, dayShare, future, busy, onSave }: { group: GroupRow; 
         <>
           <div className="mt-3 flex items-baseline justify-between text-sm">
             <span className="font-semibold tabular-nums">{future ? (budget ? wholeMoney(budget) : '—') : wholeMoney(spent)}</span>
-            <span className="text-xs text-slate-500 dark:text-slate-400">{budget === null ? 'no budget' : future ? 'a month' : `of ${wholeMoney(budget)}`}</span>
+            <span className="text-xs text-slate-500 dark:text-slate-400">{budget === null ? 'no budget' : future ? (yearly ? 'a year' : 'a month') : `of ${wholeMoney(budget)}`}</span>
           </div>
           <div className="relative mt-1.5 h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
             {budget !== null && !future && <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, (share ?? 0) * 100)}%`, background: bar }} />}
@@ -796,6 +938,9 @@ function Envelope({ group, dayShare, future, busy, onSave }: { group: GroupRow; 
             <div className={cx('mt-1 text-xs', state === 'over' ? 'text-red-600 dark:text-red-400' : state === 'ahead' ? 'text-amber-700 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400')}>
               {state === 'over' ? `${wholeMoney(-left)} over` : `${wholeMoney(left)} left${state === 'ahead' ? ', ahead of pace' : ''}`}
             </div>
+          )}
+          {yearly && !future && dayShare < 1 && budget !== null && (
+            <div className={cx('text-xs', group.projected > budget ? 'text-amber-700 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400')}>On track for {wholeMoney(group.projected)} by December</div>
           )}
         </>
       )}
@@ -807,10 +952,13 @@ function Envelope({ group, dayShare, future, busy, onSave }: { group: GroupRow; 
 
 function Pace({ data }: { data: PersonalData }) {
   const p = data.detail.pace;
+  const yearly = p.unit === 'month';
+  const title = yearly ? 'Spending through the year' : 'Spending through the month';
+  const what = yearly ? 'year' : 'month';
   if (data.future) {
     return (
-      <Card title="Spending through the month">
-        <p className="py-6 text-center text-sm text-slate-500">This month hasn't started yet. A typical month ends near {wholeMoney(p.typical[p.typical.length - 1] ?? 0)}.</p>
+      <Card title={title}>
+        <p className="py-6 text-center text-sm text-slate-500">This {what} hasn't started yet. A typical {what} ends near {wholeMoney(p.typical[p.typical.length - 1] ?? 0)}.</p>
       </Card>
     );
   }
@@ -824,13 +972,13 @@ function Pace({ data }: { data: PersonalData }) {
   const typicalSameDay = p.typical[Math.max(0, p.actual.length - 1)] ?? 0;
   const diff = end - typicalSameDay;
   return (
-    <Card title="Spending through the month">
+    <Card title={title}>
       <p className="mb-2 text-sm">
         {p.actual.length ? (
           <>
-            <span className="font-semibold">{wholeMoney(end)}</span> by day {p.actual.length},{' '}
+            <span className="font-semibold">{wholeMoney(end)}</span> {yearly ? `through ${MONTHS[p.actual.length - 1]}` : `by day ${p.actual.length}`},{' '}
             <span className={diff > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}>
-              {wholeMoney(Math.abs(diff))} {diff > 0 ? 'more' : 'less'} than a typical month
+              {wholeMoney(Math.abs(diff))} {diff > 0 ? 'more' : 'less'} than a typical {what}
             </span>{' '}
             by then.
           </>
@@ -838,7 +986,7 @@ function Pace({ data }: { data: PersonalData }) {
           'No spending yet.'
         )}
       </p>
-      <svg viewBox={`0 0 ${W} ${H}`} className="h-40 w-full" role="img" aria-label="Spending added up day by day, beside a typical month">
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-40 w-full" role="img" aria-label={`Spending added up ${yearly ? 'month by month' : 'day by day'}, beside a typical ${what}`}>
         <defs>
           <linearGradient id="pace-fill" x1="0" x2="0" y1="0" y2="1">
             <stop offset="0" stopColor="#f43f5e" stopOpacity="0.35" />
@@ -863,18 +1011,18 @@ function Pace({ data }: { data: PersonalData }) {
         )}
         <line x1={4} x2={W - 4} y1={H - 14} y2={H - 14} className="stroke-slate-300 dark:stroke-slate-700" />
         <text x={4} y={H - 2} className="fill-slate-400 text-[9px]">
-          1st
+          {yearly ? 'Jan' : '1st'}
         </text>
         <text x={W - 4} y={H - 2} textAnchor="end" className="fill-slate-400 text-[9px]">
-          {p.days}th
+          {yearly ? 'Dec' : `${p.days}th`}
         </text>
       </svg>
       <div className="mt-1 flex gap-4 text-xs text-slate-600 dark:text-slate-400">
         <Legend colour="#f43f5e" line>
-          {monthName(data.month, true)}
+          {spanName(data, true)}
         </Legend>
         <Legend colour="#94a3b8" line>
-          Typical month
+          Typical {what}
         </Legend>
       </div>
     </Card>
@@ -937,10 +1085,10 @@ function ComingUp({ data }: { data: PersonalData }) {
 
 /* ---------- The biggest, and the year ---------- */
 
-function Biggest({ data }: { data: PersonalData }) {
+function Biggest({ data, member }: { data: PersonalData; member: boolean }) {
   const list = data.detail.biggest;
   return (
-    <Card title={`Biggest spending in ${monthName(data.month, true)}`}>
+    <Card title={`Biggest spending in ${spanName(data, true)}`}>
       {!list.length ? (
         <p className="py-4 text-center text-sm text-slate-500">{data.future ? 'Not here yet.' : 'Nothing spent.'}</p>
       ) : (
@@ -954,12 +1102,12 @@ function Biggest({ data }: { data: PersonalData }) {
                 <span className="flex size-8 items-center justify-center rounded-full" style={{ background: `${gi.colour}22`, color: gi.colour }}>
                   <I className="size-4" aria-hidden />
                 </span>
-                <Link to={`/transactions?id=${t.id}&preset=all&kind=all`} className="min-w-0 flex-1 hover:underline">
+                <TxName id={t.id} member={member} className="min-w-0 flex-1">
                   <div className="truncate font-medium">{t.name}</div>
                   <div className="truncate text-xs text-slate-500">
                     {dayLabel(t.posted)} · {gi.label} · {t.account}
                   </div>
-                </Link>
+                </TxName>
                 <span className="font-semibold tabular-nums">{wholeMoney(-t.amount)}</span>
               </li>
             );
@@ -971,7 +1119,7 @@ function Biggest({ data }: { data: PersonalData }) {
 }
 
 function YourYear({ data }: { data: PersonalData }) {
-  const y = data.year;
+  const y = data.last12;
   const spent = useMemo(() => [...y.spent].sort((a, b) => b.amount - a.amount), [y.spent]);
   const earned = y.earned.reduce((s, g) => s + g.amount, 0);
   const out = spent.reduce((s, g) => s + g.amount, 0);
