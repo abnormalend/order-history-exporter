@@ -14,6 +14,7 @@ export const NAV = [
   { to: '/profit-loss', label: 'Profit & loss', icon: TrendingUp },
   { to: '/stays', label: 'Stays', icon: BedDouble, strOnly: true },
   { to: '/leases', label: 'Leases', icon: KeyRound },
+  { to: '/personal', label: 'My money', icon: Wallet, divider: true },
   { to: '/accounts', label: 'Accounts', icon: Landmark, divider: true },
   { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight, phone: true },
   { to: '/review', label: 'Review', icon: Inbox, phone: true },

@@ -1,0 +1,176 @@
+// The personal money dashboard: money in, money out and money only moved, grouped
+// by kind, with typical months, regular payments, budgets and a look ahead.
+// Made-up data only, placed relative to the current month so it never goes stale.
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const { openDatabase } = require('../server/db');
+const { buildApp } = require('../server/dist/app');
+const { businessPattern, classify, seriesKey } = require('../server/dist/personal/groups');
+
+let dir;
+let db;
+let app;
+let base;
+let cookie;
+let checkingId;
+
+const call = (route, options = {}) =>
+  fetch(`${base}${route}`, { ...options, headers: { cookie, 'x-requested-with': 'expense-hub', ...(options.body ? { 'content-type': 'application/json' } : {}) } });
+const post = async (route, body = {}) => {
+  const response = await call(route, { method: 'POST', body: JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
+  return data;
+};
+const get = async (route) => (await call(route)).json();
+
+const addMonths = (month, n) => {
+  const [y, m] = month.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
+};
+const thisMonth = new Date().toISOString().slice(0, 7);
+const lastMonth = addMonths(thisMonth, -1);
+const usDate = (month, day) => `${month.slice(5)}/${String(day).padStart(2, '0')}/${month.slice(0, 4)}`;
+
+before(async () => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eh-personal-'));
+  db = openDatabase(path.join(dir, 'orders.db'));
+  app = buildApp({ db, tokens: { get: () => 'tok', rotate: () => 'tok' }, allowedHosts: () => true });
+  await app.listen({ port: 0, host: '127.0.0.1' });
+  base = `http://127.0.0.1:${app.server.address().port}`;
+  const setup = await fetch(`${base}/api/auth/setup`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-requested-with': 'expense-hub' },
+    body: JSON.stringify({ setupCode: 'tok', username: 'owner', password: 'a long test password' }),
+  });
+  cookie = setup.headers.get('set-cookie').split(';')[0];
+
+  // Six complete months of the same paycheck, rent, groceries and streaming, plus a
+  // monthly move to a brokerage. Last month also has one payment nothing recognises.
+  const rows = ['Date,Description,Amount'];
+  for (let i = 6; i >= 1; i--) {
+    const m = addMonths(thisMonth, -i);
+    rows.push(`${usDate(m, 1)},OAK STREET APTS RENT,-2000.00`);
+    rows.push(`${usDate(m, 5)},NETFLIX.COM,-15.99`);
+    rows.push(`${usDate(m, 10)},WHOLE FOODS MARKET 123,-300.00`);
+    rows.push(`${usDate(m, 15)},EXAMPLE CORP PAYROLL PPD ID: 999,5000.00`);
+    rows.push(`${usDate(m, 20)},FIDELITY MONEYLINE,-1000.00`);
+    rows.push(`${usDate(m, 3)},SIDE GIG LLC PPD ID: 7,250.00`);
+    rows.push(`${usDate(m, 25)},SIDE GIG LLC PPD ID: 7,250.00`);
+  }
+  rows.push(`${usDate(lastMonth, 12)},XYZQ THING 42,-50.00`);
+  rows.push(`${usDate(thisMonth, 1)},OAK STREET APTS RENT,-2000.00`);
+  rows.push('');
+  await post('/api/bank/import', { content: rows.join('\n'), fileName: 'checking.csv', newAccount: { name: 'Everyday checking', kind: 'checking', owner: 'personal' } });
+
+  const card = ['Date,Description,Amount', `${usDate(lastMonth, 8)},AMAZON MKTPLACE,-100.00`, ''].join('\n');
+  await post('/api/bank/import', { content: card, fileName: 'card.csv', newAccount: { name: 'Rewards card', kind: 'credit', owner: 'personal' } });
+
+  const { accounts } = await get('/api/bank/accounts');
+  checkingId = accounts.find((a) => a.name === 'Everyday checking').id;
+});
+
+after(async () => {
+  await app.close();
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('payments are sorted into money in, money out and money moved', () => {
+  assert.deepEqual(classify({ amount: 5000, description: 'EXAMPLE CORP PAYROLL PPD ID: 1' }), { flow: 'in', group: 'pay', guessed: true });
+  assert.equal(classify({ amount: -2000, description: 'OAK STREET APTS RENT' }).group, 'home');
+  assert.equal(classify({ amount: -40, description: 'Zelle payment to Pat Example' }).group, 'people');
+  assert.deepEqual(classify({ amount: -1000, description: 'FIDELITY MONEYLINE' }), { flow: 'move', group: 'invested', guessed: true });
+  assert.equal(classify({ amount: 1000, description: 'SCHWAB BROKERAGE' }).group, 'from_savings');
+  // The owner's category wins over the description, and money back on a purchase is less spending.
+  assert.deepEqual(classify({ amount: -60, description: 'XYZQ THING', category: 'Grocery' }), { flow: 'out', group: 'food', guessed: false });
+  assert.deepEqual(classify({ amount: 25, description: 'STORE CREDIT', category: 'Clothing' }), { flow: 'out', group: 'shopping', guessed: false });
+  // A transfer to one of the owner's business accounts is money moved, by its last four.
+  const business = businessPattern(['1234']);
+  assert.deepEqual(classify({ amount: -500, description: 'Online transfer to CHK ...1234' }, business), { flow: 'move', group: 'business', guessed: true });
+  assert.equal(classify({ amount: -500, description: 'Online transfer to CHK ...9999' }, business).group, 'between');
+  assert.equal(businessPattern([]), null);
+  // The same payee next month has the same key; payments to people are keyed by who.
+  assert.equal(seriesKey('EXAMPLE CORP PAYROLL PPD ID: 1'), seriesKey('EXAMPLE CORP PAYROLL PPD ID: 2'));
+  assert.equal(seriesKey('Zelle payment to Pat Example Conf# 1'), 'person pat example');
+});
+
+test('a past month shows what came in, where it went and what was only moved', async () => {
+  const data = await get(`/api/personal?month=${lastMonth}`);
+  assert.equal(data.month, lastMonth);
+  assert.equal(data.future, false);
+  const d = data.detail;
+  assert.equal(d.earned, 5500);
+  assert.equal(d.spent, 2465.99);
+  assert.equal(d.kept, 3034.01);
+  const group = (key) => d.groups.find((g) => g.key === key);
+  assert.equal(group('home').amount, 2000);
+  assert.equal(group('food').amount, 300);
+  assert.equal(group('subscriptions').amount, 15.99);
+  assert.equal(group('shopping').amount, 100);
+  assert.equal(group('other').amount, 50);
+  assert.deepEqual(d.moves, [{ key: 'invested', amount: -1000 }]);
+  assert.equal(d.sources[0].key, 'pay');
+  assert.equal(d.unsorted, 3); // the odd payment and the two side-gig payments
+  assert.equal(d.biggest[0].amount, -2000);
+  assert.equal(d.pace.actual.length, d.pace.days);
+  assert.equal(d.pace.actual[d.pace.days - 1], 2465.99);
+  assert.ok(data.accounts.some((a) => a.name === 'Rewards card'));
+});
+
+test('typical months, regular payments and the year come from the history', async () => {
+  const data = await get('/api/personal');
+  assert.equal(data.month, thisMonth);
+  assert.equal(data.typical.home, 2000);
+  assert.equal(data.typical.food, 300);
+  // One odd payment doesn't make a typical month.
+  assert.equal(data.typical.other, 0);
+  const payroll = data.recurring.find((r) => r.name === 'Example Corp Payroll');
+  assert.equal(payroll.amount, 5000);
+  assert.equal(payroll.day, 15);
+  assert.ok(data.recurring.some((r) => r.group === 'home' && r.amount === -2000 && r.paidThisMonth));
+  // A side gig paid on the 3rd and the 25th is two regular payments, not one of double.
+  const gig = data.recurring.filter((r) => r.name === 'Side Gig LLC');
+  assert.deepEqual(gig.map((r) => [r.day, r.amount]), [[3, 250], [25, 250]]);
+  // A brokerage move is never a regular bill.
+  assert.ok(!data.recurring.some((r) => r.group === 'invested'));
+  assert.equal(data.year.to, lastMonth);
+  assert.equal(data.year.earned.find((g) => g.key === 'pay').amount, 30000);
+  // A year back and six months ahead.
+  assert.equal(data.months.length, 19);
+  assert.equal(data.months.filter((m) => m.future).length, 6);
+});
+
+test('the months ahead are forecast from regular income and typical spending, then budgets', async () => {
+  const ahead = addMonths(thisMonth, 2);
+  let data = await get(`/api/personal?month=${ahead}`);
+  assert.equal(data.future, true);
+  assert.equal(data.detail.earned, 5500);
+  assert.equal(data.detail.spent, 2315.99);
+  assert.equal(data.months.find((m) => m.month === ahead).projectedSpent, 2315.99);
+
+  const { budgets } = await post('/api/personal/budgets', { group: 'food', monthly: 400 });
+  assert.deepEqual(budgets, { food: 400 });
+  data = await get(`/api/personal?month=${ahead}`);
+  assert.equal(data.detail.spent, 2415.99);
+  assert.equal(data.detail.groups.find((g) => g.key === 'food').budget, 400);
+  assert.equal(data.detail.pace.budget, 2415.99);
+
+  await assert.rejects(post('/api/personal/budgets', { group: 'pay', monthly: 10 }), { status: 400 });
+  await assert.rejects(post('/api/personal/budgets', { group: 'food', monthly: 'lots' }), { status: 400 });
+  assert.deepEqual((await post('/api/personal/budgets', { group: 'food', monthly: null })).budgets, {});
+  assert.equal((await get(`/api/personal?month=${ahead}`)).detail.spent, 2315.99);
+});
+
+test('accounts can be picked, and a bad month is refused', async () => {
+  const data = await get(`/api/personal?month=${lastMonth}&accounts=${checkingId}`);
+  assert.deepEqual(data.selectedAccounts, [checkingId]);
+  assert.equal(data.detail.spent, 2365.99);
+  assert.ok(!data.detail.groups.find((g) => g.key === 'shopping').amount);
+  assert.equal((await call('/api/personal?month=2026-1')).status, 400);
+  assert.equal((await fetch(`${base}/api/personal`, { headers: { 'x-requested-with': 'expense-hub' } })).status, 401);
+});

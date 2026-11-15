@@ -16,6 +16,20 @@ interface AccountsData {
   reviewCount: number;
 }
 
+// Accounts in one box per bank, banks in name order, and the rest (files, cash, rent
+// received elsewhere) last.
+function byBank(accounts: Account[]) {
+  const groups = new Map<string, { name: string; colour: string | null; accounts: Account[] }>();
+  for (const account of accounts) {
+    const brand = brandOf(account.institution, account.name);
+    const name = brand?.name ?? 'Other accounts';
+    let group = groups.get(name);
+    if (!group) groups.set(name, (group = { name, colour: brand?.colour ?? null, accounts: [] }));
+    group.accounts.push(account);
+  }
+  return [...groups.values()].sort((a, b) => Number(!a.colour) - Number(!b.colour) || a.name.localeCompare(b.name));
+}
+
 export function Accounts({ meta }: { meta: Meta | null }) {
   const { data, error, loading, reload } = useApi<AccountsData>('/api/bank/accounts');
   const imports = useApi<{ imports: any[] }>('/api/bank/imports');
@@ -49,11 +63,25 @@ export function Accounts({ meta }: { meta: Meta | null }) {
               {plural(undecided, 'account')} {undecided === 1 ? 'is' : 'are'} set to “Mixed”. If an account is only for business or only personal, say so below, and its transactions are sorted for you.
             </Banner>
           )}
-          <div className="mb-6 grid gap-4 lg:grid-cols-2">
-            {data.accounts.map((account) => (
-              <AccountCard key={account.id} account={account} others={data.accounts.filter((a) => a.id !== account.id)} entities={meta?.entities || []} onChange={reload} />
-            ))}
-          </div>
+          {byBank(data.accounts).map((group) => (
+            <section
+              key={group.name}
+              aria-label={group.name}
+              className={cx('mb-6 rounded-xl border-2 p-3 sm:p-4', !group.colour && 'border-slate-300 dark:border-slate-600')}
+              style={group.colour ? { borderColor: group.colour } : undefined}
+            >
+              <h2 className="mb-3 flex items-center gap-2 text-base font-semibold">
+                {group.colour ? <BankBadge institution={group.name} /> : null}
+                {group.name}
+                <span className="text-sm font-normal text-slate-500 dark:text-slate-400">{plural(group.accounts.length, 'account')}</span>
+              </h2>
+              <div className="grid gap-4 lg:grid-cols-2">
+                {group.accounts.map((account) => (
+                  <AccountCard key={account.id} account={account} others={data.accounts.filter((a) => a.id !== account.id)} entities={meta?.entities || []} onChange={reload} />
+                ))}
+              </div>
+            </section>
+          ))}
           {!data.accounts.length && (
             <Card className="mb-6">
               <Empty>No accounts yet. Connect SimpleFIN above, or import a statement file.</Empty>

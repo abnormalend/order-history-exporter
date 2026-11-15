@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 23;
+const SCHEMA_VERSION = 24;
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -586,6 +586,15 @@ const SCHEMA_V17 = `
 // A business that has closed keeps its history, marked with the day it closed. And
 // what each business reported on its tax return, line by line, to compare with what
 // Business Hub has for the same year.
+// A monthly budget for each kind of personal spending.
+const SCHEMA_V24 = `
+  CREATE TABLE personal_budgets (
+    group_key TEXT PRIMARY KEY,
+    monthly REAL NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`;
+
 const SCHEMA_V23 = `
   ALTER TABLE entities ADD COLUMN closed_on TEXT;
   CREATE TABLE tax_return_lines (
@@ -852,6 +861,7 @@ function migrate(db, file) {
     if (version < 21) db.exec(SCHEMA_V21);
     if (version < 22) db.exec(SCHEMA_V22);
     if (version < 23) db.exec(SCHEMA_V23);
+    if (version < 24) db.exec(SCHEMA_V24);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
