@@ -1,7 +1,7 @@
 // Bank and card accounts, and the SimpleFIN connection that feeds them.
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Download, ExternalLink, History, Link2, RefreshCw, Trash2, Unplug, Upload } from 'lucide-react';
+import { Combine, Download, ExternalLink, History, Link2, RefreshCw, Trash2, Unplug, Upload } from 'lucide-react';
 import { download, post, useApi } from '../api';
 import { KIND_LABELS, OWNER_LABELS, SourceBadges, importLink, when } from '../bank';
 import type { Account, Entity, SimplefinStatus } from '../bank';
@@ -51,7 +51,7 @@ export function Accounts({ meta }: { meta: Meta | null }) {
           )}
           <div className="mb-6 grid gap-4 lg:grid-cols-2">
             {data.accounts.map((account) => (
-              <AccountCard key={account.id} account={account} entities={meta?.entities || []} onChange={reload} />
+              <AccountCard key={account.id} account={account} others={data.accounts.filter((a) => a.id !== account.id)} entities={meta?.entities || []} onChange={reload} />
             ))}
           </div>
           {!data.accounts.length && (
@@ -210,11 +210,47 @@ function SimplefinCard({ status, onChange }: { status: SimplefinStatus | null; o
   );
 }
 
-function AccountCard({ account, entities, onChange }: { account: Account; entities: Entity[]; onChange: () => void }) {
+interface MergePreview {
+  into: string;
+  moved: number;
+  merged: number;
+}
+
+function AccountCard({ account, others, entities, onChange }: { account: Account; others: Account[]; entities: Entity[]; onChange: () => void }) {
   const [name, setName] = useState(account.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [confirm, setConfirm] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [into, setInto] = useState('');
+  const [preview, setPreview] = useState<MergePreview | null>(null);
+  // Accounts it could be merged into: not two that are both connected to the bank.
+  const targets = others.filter((o) => !(o.simplefinId && account.simplefinId));
+
+  async function previewMerge(target: string) {
+    setInto(target);
+    setPreview(null);
+    if (!target) return;
+    setBusy(true);
+    setError('');
+    try {
+      setPreview(await post<MergePreview>(`/api/bank/accounts/${account.id}/merge`, { intoId: Number(target), dryRun: true }));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setBusy(false);
+  }
+  async function merge() {
+    setBusy(true);
+    try {
+      await post(`/api/bank/accounts/${account.id}/merge`, { intoId: Number(into) });
+      setMerging(false);
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setBusy(false);
+  }
 
   async function save(changes: Partial<Pick<Account, 'name' | 'kind' | 'owner' | 'entityId'>>) {
     setBusy(true);
@@ -323,11 +359,47 @@ function AccountCard({ account, entities, onChange }: { account: Account; entiti
           <Download className="size-4" aria-hidden />
           Export OFX
         </Button>
+        {targets.length > 0 && (
+          <Button disabled={busy} onClick={() => setMerging(true)}>
+            <Combine className="size-4" aria-hidden />
+            Merge into…
+          </Button>
+        )}
         <Button variant="danger" disabled={busy} onClick={() => setConfirm(true)}>
           <Trash2 className="size-4" aria-hidden />
           Remove
         </Button>
       </div>
+      <Confirm
+        open={merging}
+        title={`Merge ${account.name} into another account`}
+        confirmLabel="Merge accounts"
+        busy={busy || !preview}
+        onConfirm={merge}
+        onCancel={() => {
+          setMerging(false);
+          void previewMerge('');
+        }}
+      >
+        <p>For an account that is the same as another, such as a bank's feed and the files you uploaded before. Payments both have become one, keeping your edits on the account you merge into; the rest move across. Its bank connection and balance go with it, and this account is removed.</p>
+        <div className="mt-3">
+          <Field label="Merge into">
+            <Select value={into} disabled={busy} onChange={(e) => void previewMerge(e.target.value)}>
+              <option value="">Choose an account</option>
+              {targets.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+        {preview && (
+          <p className="mt-3">
+            {plural(preview.merged, 'payment')} {preview.merged === 1 ? 'is' : 'are'} already in {preview.into} and will become one; {plural(preview.moved, 'payment')} will move across.
+          </p>
+        )}
+      </Confirm>
       <Confirm open={confirm} title={`Remove ${account.name}?`} confirmLabel="Remove account" busy={busy} onConfirm={remove} onCancel={() => setConfirm(false)}>
         This deletes the account and its {plural(account.transactions, 'transaction')} from Business Hub, including your edits to them. It can't be undone, except by restoring a backup.
         {account.simplefinId && ' While SimpleFIN is connected, the next update adds the account back; remove it in SimpleFIN Bridge to stop that.'}

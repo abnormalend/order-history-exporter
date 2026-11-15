@@ -174,6 +174,20 @@ export function bankRoutes(app: FastifyInstance, bank: BankStore, simplefin: Sim
     return bank.updateAccount(id, body as never);
   });
 
+  // Merges this account into another that is really the same one.
+  app.post('/api/bank/accounts/:id/merge', async (request) => {
+    const id = idParam((request.params as { id: string }).id);
+    const body = parse(z.object({ intoId: z.number().int().positive(), dryRun: z.boolean().optional() }), request.body);
+    let result;
+    try {
+      result = bank.mergeAccount(id, body.intoId, { dryRun: body.dryRun });
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+    if (!body.dryRun) audit(request, 'bank.account.merge', { from: id, into: body.intoId, moved: result.moved, merged: result.merged });
+    return { ...result, unmatched: result.unmatched.slice(0, 50) };
+  });
+
   app.post('/api/bank/accounts/:id/delete', async (request) => {
     const id = idParam((request.params as { id: string }).id);
     const name = bank.account(id)?.name;

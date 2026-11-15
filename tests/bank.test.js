@@ -729,3 +729,48 @@ test('the Chrome extension page address is kept for the Open the extension link'
   await post('/api/settings/extension', { url: '' });
   assert.deepEqual(await get('/api/settings/extension'), { url: null });
 });
+
+test('an account that came in twice (a file and the bank feed) merges into one', async () => {
+  const kept = (
+    await post('/api/bank/import', {
+      content: 'Date,Description,Amount\n03/02/2026,ACME PAYROLL PPD,2500.00\n03/05/2026,CITY WATER UTIL,-61.20\n03/09/2026,CORNER BAKERY 12,-8.40\n',
+      fileName: 'mine.csv',
+      newAccount: { name: 'My checking (file)', kind: 'checking', owner: 'personal' },
+    })
+  ).accountId;
+  const twin = (
+    await post('/api/bank/import', {
+      content: 'Date,Description,Amount\n03/03/2026,ACME PAYROLL,2500.00\n03/05/2026,CITY WATER UTILITY BILL,-61.20\n03/20/2026,FUEL STOP 9,-40.00\n',
+      fileName: 'feed.csv',
+      newAccount: { name: 'CHECKING (9876)', kind: 'checking', owner: 'mixed' },
+    })
+  ).accountId;
+  // The twin is the one connected to the bank.
+  db.raw.prepare("UPDATE bank_accounts SET simplefin_id = 'ACT-merge-test', balance = 1234.5, balance_date = '2026-03-20', institution = 'Test Bank' WHERE id = ?").run(twin);
+  const mine = (await get(`/api/bank/transactions?kind=all&preset=all&account=${kept}`)).transactions;
+  await post('/api/bank/transactions/update', { ids: [mine.find((t) => t.amount === -61.2).id], category: 'Utilities', note: 'Kept through the merge' });
+
+  const preview = await post(`/api/bank/accounts/${twin}/merge`, { intoId: kept, dryRun: true });
+  assert.deepEqual([preview.merged, preview.moved], [2, 1]);
+  assert.deepEqual(preview.unmatched.map((u) => u.amount), [-40]);
+  assert.ok((await get('/api/bank/accounts')).accounts.some((a) => a.id === twin), 'a preview changes nothing');
+
+  await post(`/api/bank/accounts/${twin}/merge`, { intoId: kept });
+  const accounts = (await get('/api/bank/accounts')).accounts;
+  assert.ok(!accounts.some((a) => a.id === twin), 'the twin is gone');
+  const merged = accounts.find((a) => a.id === kept);
+  assert.deepEqual([merged.name, merged.owner, merged.simplefinId, merged.balance, merged.institution], ['My checking (file)', 'personal', 'ACT-merge-test', 1234.5, 'Test Bank']);
+  const after = (await get(`/api/bank/transactions?kind=all&preset=all&account=${kept}`)).transactions;
+  assert.deepEqual(after.map((t) => t.amount).sort((a, b) => a - b), [-61.2, -40, -8.4, 2500]);
+  const water = after.find((t) => t.amount === -61.2);
+  assert.deepEqual([water.category, water.note], ['Utilities', 'Kept through the merge']);
+  // Importing the twin's file again into the kept account adds nothing.
+  const again = await post('/api/bank/import', {
+    content: 'Date,Description,Amount\n03/03/2026,ACME PAYROLL,2500.00\n03/05/2026,CITY WATER UTILITY BILL,-61.20\n03/20/2026,FUEL STOP 9,-40.00\n',
+    fileName: 'feed.csv',
+    accountId: kept,
+  });
+  assert.equal(again.added, 0);
+
+  await assert.rejects(post(`/api/bank/accounts/${kept}/merge`, { intoId: kept }), /different account/);
+});

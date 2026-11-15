@@ -753,6 +753,80 @@ export function createBankStore(db: DatabaseSync) {
     return result;
   }
 
+  // Two accounts that are really one (a file's account and the same account from
+  // SimpleFIN): everything in `fromId` moves to `intoId`. A payment both have becomes
+  // one, keeping the choices made on the account kept; the bank connection, balance
+  // and rules come along, and the emptied account goes. With dryRun, says what would
+  // happen and changes nothing.
+  function mergeAccount(fromId: number, intoId: number, { dryRun = false } = {}) {
+    const from = account(fromId);
+    const into = account(intoId);
+    if (!from || !into) throw new Error('That account no longer exists.');
+    if (fromId === intoId) throw new Error('Choose a different account to merge into.');
+    if (from.simplefinId && into.simplefinId) throw new Error('Both accounts are connected to the bank; disconnect one first.');
+    const result = transaction(() => {
+      const owned = db.prepare('SELECT * FROM bank_transactions WHERE account_id = ? ORDER BY posted, id').all(fromId) as Row[];
+      const unpair = unpairStmt();
+      const moveSources = db.prepare('UPDATE OR IGNORE bank_tx_sources SET account_id = ? WHERE transaction_id = ? AND account_id = ?');
+      const candidates = db.prepare(
+        `SELECT * FROM bank_transactions WHERE account_id = ? AND CAST(ROUND(amount * 100) AS INTEGER) = ? AND posted BETWEEN ? AND ?`
+      );
+      const shift = (date: string, days: number) => new Date((dayNumber(date) + days) * DAY_MS).toISOString().slice(0, 10);
+      // Only what the kept account had before the merge can be matched, and each once.
+      const before = new Set((db.prepare('SELECT id FROM bank_transactions WHERE account_id = ?').all(intoId) as Row[]).map((r) => r.id as number));
+      const taken = new Set<number>();
+      let moved = 0;
+      let merged = 0;
+      const unmatched: { posted: string; amount: number; description: string }[] = [];
+      for (const t of owned) {
+        if (t.transfer_id && t.kind_source === 'auto') {
+          unpair.run(t.transfer_id);
+          unpair.run(t.id);
+        }
+        const same = (candidates.all(intoId, toCents(t.amount), shift(t.posted, -MATCH_DAYS), shift(t.posted, MATCH_DAYS)) as Row[]).filter(
+          (c) =>
+            before.has(c.id as number) &&
+            !taken.has(c.id as number) &&
+            [c.description, c.payee, c.memo].filter(Boolean).some((x) => [t.description, t.payee, t.memo].filter(Boolean).some((y) => similarDescriptions(x, y)))
+        );
+        db.prepare('UPDATE bank_transactions SET account_id = ?, updated_at = ? WHERE id = ?').run(intoId, now(), t.id);
+        moveSources.run(intoId, t.id, fromId);
+        db.prepare('DELETE FROM bank_tx_sources WHERE transaction_id = ? AND account_id = ?').run(t.id, fromId);
+        if (same.length) {
+          const day = dayNumber(t.posted as string);
+          const keep = same.reduce((a, b) => (Math.abs(dayNumber(b.posted) - day) < Math.abs(dayNumber(a.posted) - day) ? b : a));
+          taken.add(keep.id as number);
+          mergeInto(db.prepare('SELECT * FROM bank_transactions WHERE id = ?').get(t.id) as Row, keep);
+          merged++;
+        } else {
+          moved++;
+          unmatched.push({ posted: t.posted as string, amount: t.amount as number, description: t.description as string });
+        }
+      }
+      db.prepare('UPDATE bank_imports SET account_id = ? WHERE account_id = ?').run(intoId, fromId);
+      db.prepare('UPDATE bank_rules SET account_id = ? WHERE account_id = ?').run(intoId, fromId);
+      db.prepare('UPDATE loan_payments SET account_id = ? WHERE account_id = ?').run(intoId, fromId);
+      db.prepare('UPDATE bank_accounts SET split_account_id = ? WHERE split_account_id = ?').run(intoId, fromId);
+      // The bank connection and what it knows move to the kept account.
+      const f = db.prepare('SELECT * FROM bank_accounts WHERE id = ?').get(fromId) as Row;
+      const i = db.prepare('SELECT * FROM bank_accounts WHERE id = ?').get(intoId) as Row;
+      db.prepare('UPDATE bank_accounts SET simplefin_id = NULL WHERE id = ?').run(fromId);
+      const newer = (f.balance_date ?? '') > (i.balance_date ?? '') || (i.balance === null && f.balance !== null);
+      db.prepare(
+        `UPDATE bank_accounts SET simplefin_id = COALESCE(simplefin_id, ?), institution = COALESCE(institution, ?), last4 = COALESCE(last4, ?), file_key = COALESCE(file_key, ?),
+           last_synced_at = MAX(COALESCE(last_synced_at, ''), COALESCE(?, '')), balance = CASE WHEN ? THEN ? ELSE balance END, balance_date = CASE WHEN ? THEN ? ELSE balance_date END
+         WHERE id = ?`
+      ).run(f.simplefin_id, f.institution, f.last4, f.file_key, f.last_synced_at, newer ? 1 : 0, f.balance, newer ? 1 : 0, f.balance_date, intoId);
+      db.prepare("UPDATE bank_accounts SET last_synced_at = NULL WHERE id = ? AND last_synced_at = ''").run(intoId);
+      db.prepare('DELETE FROM bank_accounts WHERE id = ?').run(fromId);
+      if (moved) applyRules(`t.account_id = ${Number(intoId)}`);
+      detectTransfers();
+      return { from: from.name, into: into.name, moved, merged, unmatched };
+    }, dryRun);
+    if (!dryRun) for (const listener of afterImport) listener();
+    return result;
+  }
+
   // Which account a file's rows are already in: each account's count of rows with the
   // same amount, near the same date, and a similar description. A file that overlaps
   // an account's history is almost certainly that account's.
@@ -1485,6 +1559,7 @@ export function createBankStore(db: DatabaseSync) {
     importDetail,
     undoImport,
     moveImport,
+    mergeAccount,
     accountOverlap,
     csvLayout,
     saveCsvLayout,
