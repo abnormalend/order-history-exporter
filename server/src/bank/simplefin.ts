@@ -101,6 +101,7 @@ const isoDate = (seconds: number) => new Date(seconds * 1000).toISOString().slic
 export function guessKind(name: string): AccountKind {
   if (/\bloan\b|mortgage|\bheloc\b|\bcre\b/i.test(name)) return 'loan';
   if (/card|visa|master ?card|amex|american express|discover|credit|rewards/i.test(name)) return 'credit';
+  if (/\b(401|403|457)\s?\(?[kb]\)?|\bira\b|\broth\b|brokerage|retirement|rollover|\bhsa\b|\b529\b|investment|\bespp\b|pension|annuity/i.test(name)) return 'investment';
   if (/saving|money market/i.test(name)) return 'savings';
   if (/checking|chk|spending/i.test(name)) return 'checking';
   return 'other';

@@ -98,7 +98,45 @@ export function peopleService({ db, auth }: { db: DatabaseSync; auth: AuthStore 
     return String(login.username);
   }
 
-  return { list, add, update, remove, addLogin, resetPassword, removeLogin };
+  /* ---------- Admins: logins that see and manage everything ---------- */
+
+  function admins() {
+    return (db.prepare("SELECT id, username, totp_secret, created_at FROM users WHERE role = 'owner' ORDER BY id").all() as Row[]).map((u) => ({
+      id: Number(u.id),
+      username: String(u.username),
+      totpEnabled: Boolean(u.totp_secret),
+      createdAt: String(u.created_at),
+    }));
+  }
+  const adminOf = (id: number) => {
+    const row = db.prepare("SELECT id, username FROM users WHERE role = 'owner' AND id = ?").get(id) as Row | undefined;
+    if (!row) throw new HttpError(404, 'That admin is not here.');
+    return row;
+  };
+
+  function addAdmin(username: string, password: string) {
+    if (auth.record(username)) throw new HttpError(409, 'That username is taken.');
+    return auth.createUser(username, password, null).id;
+  }
+
+  // Your own password is changed from your own Settings, with your current one.
+  function resetAdminPassword(id: number, password: string, selfId: number) {
+    if (id === selfId) throw new HttpError(400, 'Change your own password in the Password card.');
+    const row = adminOf(id);
+    auth.setPassword(id, password);
+    auth.disableTotp(id);
+    return String(row.username);
+  }
+
+  function removeAdmin(id: number, selfId: number) {
+    if (id === selfId) throw new HttpError(400, "You can't remove your own login.");
+    const row = adminOf(id);
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    return String(row.username);
+  }
+
+  return { list, add, update, remove, addLogin, resetPassword, removeLogin, admins, addAdmin, resetAdminPassword, removeAdmin };
 }
 
 export type PeopleService = ReturnType<typeof peopleService>;

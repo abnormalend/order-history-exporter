@@ -22,7 +22,34 @@ const idOf = (params: unknown) => {
 };
 const audit = (request: unknown, action: string, detail: unknown) => (request as AuthedRequest).audit(action, detail);
 
+const selfOf = (request: unknown) => (request as AuthedRequest).user!.id;
+
 export function peopleRoutes(app: FastifyInstance, people: PeopleService) {
+  // Admins: full access, the same as the first login.
+  app.get('/api/admins', async (request) => ({ admins: people.admins(), selfId: selfOf(request) }));
+
+  app.post('/api/admins', async (request) => {
+    const body = parse(z.object({ username, password }), request.body);
+    const id = people.addAdmin(body.username, body.password);
+    audit(request, 'admin.add', { id, username: body.username });
+    return { admins: people.admins(), selfId: selfOf(request) };
+  });
+
+  app.post('/api/admins/:id/password', async (request) => {
+    const id = idOf(request.params);
+    const body = parse(z.object({ password }), request.body);
+    const login = people.resetAdminPassword(id, body.password, selfOf(request));
+    audit(request, 'admin.password', { id, username: login });
+    return { admins: people.admins(), selfId: selfOf(request) };
+  });
+
+  app.post('/api/admins/:id/delete', async (request) => {
+    const id = idOf(request.params);
+    const login = people.removeAdmin(id, selfOf(request));
+    audit(request, 'admin.delete', { id, username: login });
+    return { admins: people.admins(), selfId: selfOf(request) };
+  });
+
   app.get('/api/people', async () => people.list());
 
   app.post('/api/people', async (request) => {

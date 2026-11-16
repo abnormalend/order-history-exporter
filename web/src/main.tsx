@@ -8,6 +8,7 @@ import { Layout } from './Layout';
 import { BusinessProvider } from './business';
 import { Accounts } from './pages/Accounts';
 import { Personal } from './pages/Personal';
+import { Wealth } from './pages/Wealth';
 import { Dashboard } from './pages/Dashboard';
 import { Import } from './pages/Import';
 import { ImportDetail } from './pages/ImportHistory';
@@ -115,6 +116,7 @@ function App() {
         <Route path="/review" element={<Review meta={meta} />} />
         <Route path="/accounts" element={<Accounts meta={meta} />} />
         <Route path="/personal" element={<Personal />} />
+        <Route path="/wealth" element={<Wealth />} />
         <Route path="/import" element={<Import />} />
         <Route path="/import/:id" element={<ImportDetail />} />
         <Route path="/more" element={<More />} />

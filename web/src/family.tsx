@@ -2,7 +2,7 @@
 // logins for them that see only their own money.
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { KeyRound, Plus, Trash2, UserRound, Users } from 'lucide-react';
+import { KeyRound, Plus, ShieldCheck, Trash2, UserRound, Users } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { post, useApi } from './api';
 import { BankBadge } from './banks';
@@ -75,6 +75,8 @@ export function FamilyCard() {
       <div className="grid gap-4 lg:grid-cols-2">
         {data?.people.map((p) => <PersonCard key={p.id} person={p} accounts={data.accounts} busy={busy} run={run} />)}
       </div>
+      <Admins />
+      <h3 className="mt-6 mb-2 text-sm font-semibold">Family members</h3>
       <form onSubmit={add} className="mt-4 flex max-w-md items-end gap-2">
         <Field label="Add someone">
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Their name" maxLength={60} />
@@ -85,6 +87,130 @@ export function FamilyCard() {
         </Button>
       </form>
     </Card>
+  );
+}
+
+interface Admin {
+  id: number;
+  username: string;
+  totpEnabled: boolean;
+}
+
+// Admins see and change everything, the same as you. Each signs in with their own
+// username, so the activity log says who did what.
+function Admins() {
+  const { data, error, reload } = useApi<{ admins: Admin[]; selfId: number }>('/api/admins');
+  const [form, setForm] = useState<null | { mode: 'add' } | { mode: 'reset'; admin: Admin }>(null);
+  const [fields, setFields] = useState({ username: '', password: '' });
+  const [removing, setRemoving] = useState<Admin | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState('');
+
+  async function run(action: () => Promise<unknown>) {
+    setBusy(true);
+    setProblem('');
+    try {
+      await action();
+      reload();
+      return true;
+    } catch (e) {
+      setProblem((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!form) return;
+    const ok =
+      form.mode === 'add'
+        ? await run(() => post('/api/admins', { username: fields.username.trim(), password: fields.password }))
+        : await run(() => post(`/api/admins/${form.admin.id}/password`, { password: fields.password }));
+    if (ok) {
+      setForm(null);
+      setFields({ username: '', password: '' });
+    }
+  }
+
+  return (
+    <section aria-label="Admins" className="mb-2 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="flex size-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200">
+          <ShieldCheck className="size-4" aria-hidden />
+        </span>
+        <h3 className="flex-1 font-semibold">Admins</h3>
+        {form?.mode !== 'add' && (
+          <Button onClick={() => setForm({ mode: 'add' })}>
+            <Plus className="size-4" aria-hidden />
+            Add an admin
+          </Button>
+        )}
+      </div>
+      <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">Full access, the same as yours: every business, account, setting and family member. For your spouse, say.</p>
+      {(error || problem) && <Banner>{problem || error?.message}</Banner>}
+      <ul className="mt-3 divide-y divide-slate-100 dark:divide-slate-800">
+        {data?.admins.map((a) => (
+          <li key={a.id} className="flex flex-wrap items-center gap-2 py-2 text-sm">
+            <KeyRound className="size-4 text-slate-500" aria-hidden />
+            <span className="font-medium">{a.username}</span>
+            {a.id === data.selfId && <span className="text-xs text-slate-500">you</span>}
+            {a.totpEnabled && <span className="text-xs text-slate-500">two-factor on</span>}
+            <span className="flex-1" />
+            {a.id !== data.selfId && (
+              <>
+                <Button onClick={() => setForm({ mode: 'reset', admin: a })}>Reset password</Button>
+                <Button variant="danger" onClick={() => setRemoving(a)}>
+                  Remove
+                </Button>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+      {form && (
+        <form onSubmit={save} className="mt-3 grid gap-2 rounded-lg bg-slate-50 p-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end dark:bg-slate-800/60">
+          {form.mode === 'add' ? (
+            <Field label="Username">
+              <Input autoFocus value={fields.username} onChange={(e) => setFields({ ...fields, username: e.target.value })} autoComplete="off" maxLength={60} />
+            </Field>
+          ) : (
+            <p className="self-center text-sm">
+              New password for <strong>{form.admin.username}</strong>
+            </p>
+          )}
+          <Field label={form.mode === 'add' ? 'Password (10 or more characters)' : 'New password'}>
+            <Input type="password" value={fields.password} onChange={(e) => setFields({ ...fields, password: e.target.value })} autoComplete="new-password" />
+          </Field>
+          <div className="flex gap-2">
+            <Button type="submit" variant="primary" busy={busy} disabled={fields.password.length < 10 || (form.mode === 'add' && !fields.username.trim())}>
+              {form.mode === 'add' ? 'Create' : 'Reset'}
+            </Button>
+            <Button type="button" onClick={() => setForm(null)}>
+              Cancel
+            </Button>
+          </div>
+          <p className="text-xs text-slate-500 sm:col-span-3">
+            {form.mode === 'add'
+              ? 'Give them the password yourself. They should change it and turn on two-factor from their own Settings.'
+              : 'Signs them out everywhere and turns off their two-factor, in case a phone was lost.'}
+          </p>
+        </form>
+      )}
+      <Confirm
+        open={Boolean(removing)}
+        title={`Remove ${removing?.username}?`}
+        confirmLabel="Remove"
+        busy={busy}
+        onCancel={() => setRemoving(null)}
+        onConfirm={async () => {
+          if (removing) await run(() => post(`/api/admins/${removing.id}/delete`));
+          setRemoving(null);
+        }}
+      >
+        They're signed out and can't sign in again. Nothing they changed is undone.
+      </Confirm>
+    </section>
   );
 }
 

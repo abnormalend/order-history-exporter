@@ -40,6 +40,8 @@ import { personalRoutes } from './routes/personal';
 import { personalService } from './personal/service';
 import { peopleRoutes } from './routes/people';
 import { peopleService } from './people/service';
+import { wealthRoutes } from './routes/wealth';
+import { wealthService } from './wealth/service';
 import type { StayService } from './stays/service';
 import { SYNC_ROUTES, syncRoutes } from './routes/sync';
 import { isPrivateAddress, sameSecret } from './security';
@@ -232,6 +234,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   plRoutes(app, pl);
   personalRoutes(app, personalService({ db: db.raw }));
   peopleRoutes(app, peopleService({ db: db.raw, auth: store }));
+  wealthRoutes(app, wealthService({ db: db.raw, bank }));
   returnsRoutes(app, returnsService({ db: db.raw, pl }), (id) => correlate.entities().some((e) => e.id === id));
   authRoutes(app, store, tokens);
 

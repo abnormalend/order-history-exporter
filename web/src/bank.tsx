@@ -10,7 +10,7 @@ export interface Account {
   id: number;
   name: string;
   institution: string | null;
-  kind: 'checking' | 'savings' | 'credit' | 'loan' | 'other';
+  kind: 'checking' | 'savings' | 'credit' | 'loan' | 'investment' | 'other';
   // A loan whose balance the user keeps.
   balanceTracked?: boolean;
   owner: 'business' | 'personal' | 'mixed';
@@ -81,7 +81,7 @@ export interface SimplefinStatus {
   syncing: boolean;
 }
 
-export const KIND_LABELS = { checking: 'Checking', savings: 'Savings', credit: 'Credit card', loan: 'Loan or mortgage', other: 'Other' };
+export const KIND_LABELS = { checking: 'Checking', savings: 'Savings', credit: 'Credit card', loan: 'Loan or mortgage', investment: 'Investment or retirement', other: 'Other' };
 export const OWNER_LABELS = { business: 'Business', personal: 'Personal', mixed: 'Mixed (decide each)' };
 export const ENTITY_KIND_LABELS = { business: 'Business', rental: 'Rental property', other: 'Other' };
 export const SOURCE_LABELS: Record<string, string> = { simplefin: 'SimpleFIN', ofx: 'OFX/QFX file', csv: 'CSV file', paypal: 'PayPal statement', receipt: 'Receipt', lease: 'Lease' };

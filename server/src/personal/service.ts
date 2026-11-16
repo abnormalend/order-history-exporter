@@ -183,7 +183,7 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         .prepare(
           `SELECT a.id, a.name, a.institution, a.kind, a.owner, a.balance, a.balance_date, a.person_id,
                   (SELECT COUNT(*) FROM bank_transactions t WHERE t.account_id = a.id AND t.status = 'personal') AS personal
-           FROM bank_accounts a WHERE a.owner != 'business' AND a.person_id IS ? ORDER BY a.name COLLATE NOCASE`
+           FROM bank_accounts a WHERE a.owner != 'business' AND a.kind != 'investment' AND a.person_id IS ? ORDER BY a.name COLLATE NOCASE`
         )
         .all(person) as Row[]
     )

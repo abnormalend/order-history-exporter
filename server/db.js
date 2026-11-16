@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 26;
+const SCHEMA_VERSION = 27;
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -602,6 +602,23 @@ const SCHEMA_V26 = `
     ('University fees', 'education', strftime('%Y-%m-%dT%H:%M:%fZ'));
 `;
 
+// Investment and retirement accounts: what kind each is (which decides how it's taxed
+// when spent) and whose it is in the household. Every balance is kept by day, for net
+// worth over time; balances already known start the history.
+const SCHEMA_V27 = `
+  ALTER TABLE bank_accounts ADD COLUMN invest_type TEXT;
+  ALTER TABLE bank_accounts ADD COLUMN holder TEXT;
+  CREATE TABLE account_balances (
+    account_id INTEGER NOT NULL REFERENCES bank_accounts (id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    balance REAL NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (account_id, day)
+  );
+  INSERT INTO account_balances (account_id, day, balance, source)
+    SELECT id, COALESCE(balance_date, substr(created_at, 1, 10)), balance, 'feed' FROM bank_accounts WHERE balance IS NOT NULL;
+`;
+
 // Family members with their own accounts and budgets in My money, and logins that see
 // only their own money. An account or login with no person is the owner's; budgets
 // for the owner are person 0.
@@ -904,6 +921,7 @@ function migrate(db, file) {
     if (version < 24) db.exec(SCHEMA_V24);
     if (version < 25) db.exec(SCHEMA_V25);
     if (version < 26) db.exec(SCHEMA_V26);
+    if (version < 27) db.exec(SCHEMA_V27);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

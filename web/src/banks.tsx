@@ -26,6 +26,11 @@ const BRANDS: [RegExp, Brand][] = [
   [/\bally\b/i, { name: 'Ally', mark: 'ally', colour: '#650360' }],
   [/paypal/i, { name: 'PayPal', mark: 'P', colour: '#003087', stripe: '#009cde' }],
   [/venmo/i, { name: 'Venmo', mark: 'V', colour: '#008cff' }],
+  [/fidelity|netbenefits/i, { name: 'Fidelity', mark: 'F', colour: '#368727' }],
+  [/schwab/i, { name: 'Charles Schwab', mark: 'CS', colour: '#00a0df' }],
+  [/\be\s?\*\s?trade\b|\betrade\b/i, { name: 'E*Trade', mark: 'E*', colour: '#5627d8' }],
+  [/morgan stanley|smith barney|\bmspbna\b/i, { name: 'Morgan Stanley', mark: 'MS', colour: '#002b51' }],
+  [/vanguard/i, { name: 'Vanguard', mark: 'V', colour: '#96151d' }],
 ];
 
 // The bank, from its name, or failing that the account's name.
