@@ -125,6 +125,10 @@ test('a past month shows what came in, where it went and what was only moved', a
   assert.deepEqual(d.moves, [{ key: 'invested', amount: -1000 }]);
   assert.equal(d.sources[0].key, 'pay');
   assert.equal(d.unsorted, 3); // the odd payment and the two side-gig payments
+  // The link to give them a category opens just those payments.
+  const linked = await get(`/api/bank/transactions?preset=all&kind=all&${d.unsortedIds.map((id) => `id=${id}`).join('&')}`);
+  assert.deepEqual(linked.transactions.map((t) => t.id).sort(), [...d.unsortedIds].sort());
+  assert.equal(linked.total, 3);
   assert.equal(d.biggest[0].amount, -2000);
   assert.equal(d.pace.actual.length, d.pace.days);
   assert.equal(d.pace.actual[d.pace.days - 1], 2465.99);

@@ -145,6 +145,7 @@ interface PersonalData {
     pace: { unit: 'day' | 'month'; days: number; actual: number[]; typical: number[]; budget: number | null };
     biggest: { id: number; posted: string; amount: number; name: string; group: string; account: string }[];
     unsorted: number;
+    unsortedIds: number[];
   };
   recurring: { key: string; name: string; flow: string; group: string; amount: number; day: number; months: number; paidThisMonth: boolean }[];
   upcoming: { name: string; flow: string; group: string; amount: number; on: string }[];
@@ -206,7 +207,6 @@ export function Personal({ member = false }: { member?: boolean }) {
   if (error) return <Banner>{error.message}</Banner>;
   if (!data) return loading ? <Loading /> : null;
   const d = data.detail;
-  const { from, to } = data.span;
 
   return (
     <>
@@ -227,7 +227,7 @@ export function Personal({ member = false }: { member?: boolean }) {
             'Ask for a category to be given to them and they will land in the right group.'
           ) : (
             <>
-              <Link className="font-medium underline" to={`/transactions?status=personal&preset=custom&from=${from}-01&to=${to}-31`}>
+              <Link className="font-medium underline" to={`/transactions?preset=all&kind=all&${d.unsortedIds.map((id) => `id=${id}`).join('&')}`}>
                 Give them a category
               </Link>{' '}
               and they'll land in the right group.

@@ -430,6 +430,7 @@ export function personalService({ db, today = () => new Date().toISOString().sli
     const yearEarned = INCOME_GROUPS.map((g) => ({ key: g, amount: cents(lastYear.reduce((s, m) => s + groupTotal(m, g), 0)) })).filter((g) => g.amount > 0);
 
     const who = person === null ? null : (people().find((p) => p.id === person) ?? null);
+    const unsorted = inSpan.filter((t) => t.guessed && (t.group === 'other' || t.group === 'other_in'));
     return {
       today: todayDate,
       thisMonth,
@@ -463,7 +464,9 @@ export function personalService({ db, today = () => new Date().toISOString().sli
           .sort((a, b) => a.amount - b.amount)
           .slice(0, 6)
           .map((t) => ({ id: t.id, posted: t.posted, amount: t.amount, name: nameOf(t), group: t.group, account: t.account })),
-        unsorted: inSpan.filter((t) => t.guessed && (t.group === 'other' || t.group === 'other_in')).length,
+        unsorted: unsorted.length,
+        // The ones to give a category, for a link straight to them (Transactions takes up to 100).
+        unsortedIds: unsorted.slice(0, 100).map((t) => t.id),
       },
       recurring,
       upcoming,
