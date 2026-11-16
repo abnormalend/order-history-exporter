@@ -40,6 +40,10 @@ export interface OrdersDb {
   status(): Any;
   categoryList(): { name: string; scheduleC: string | null; scheduleE: string | null; form1065: string | null; form8825: string | null; expenseClass: 'opex' | 'cogs' | 'income' }[];
   setItemCategory(name: string, category: string | null): void;
+  itemsToSort(): string[];
+  saveSortedItems(rows: { name: string; category: string | null }[], model: string | null): void;
+  forgetUnsureItems(): void;
+  itemSortStatus(): { waiting: number; unsure: number; sorted: number };
   saveCategory(category: { name: string; scheduleC: string | null; scheduleE: string | null; form1065?: string | null; form8825?: string | null; expenseClass?: 'opex' | 'cogs' | 'income' | null }): void;
   taxRules(): { id: number; field: string; value: string; status: string }[];
   saveTaxRule(rule: { field: string; value: string; status: string }): void;

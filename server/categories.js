@@ -1,6 +1,7 @@
 // Sorts purchased items into categories, entirely on this machine. In order of trust:
 // the user's own correction for that exact item, what their corrections have taught
-// about similar names, keyword rules, and finally a weak guess from the store.
+// about similar names, keyword rules, what Claude chose when asked to sort the rest,
+// and finally a weak guess from the store.
 
 const UNCATEGORIZED = 'Uncategorized';
 
@@ -10,7 +11,7 @@ const CATEGORIES = [
   ['Cleaning Supplies', '22', '7', ['cleaner', 'cleaning', 'disinfectant', 'bleach', 'detergent', 'laundry', 'dish soap', 'dishwasher pod', 'dishwasher detergent', 'dishwashing', 'fabric softener', 'dryer sheet', 'stain remover', 'lysol', 'clorox', 'windex', 'pine sol', 'swiffer', 'mop', 'broom', 'scrubber', 'sponge', 'scouring', 'tide', 'gain', 'downy', 'cascade', 'dawn', 'vacuum bag', 'air freshener', 'febreze', 'disinfecting wipe', 'degreaser']],
   ['Linens & Bedding', '22', '15', ['bed sheet', 'sheet set', 'fitted sheet', 'pillowcase', 'pillow', 'duvet', 'comforter', 'blanket', 'mattress protector', 'mattress pad', 'mattress topper', 'bath towel', 'hand towel', 'towel set', 'washcloth', 'bath mat', 'tablecloth', 'shower curtain', 'bedding', 'linen', 'quilt', 'towel']],
   ['Household Paper & Disposables', '22', '15', ['paper towel', 'toilet paper', 'bath tissue', 'facial tissue', 'tissue', 'napkin', 'trash bag', 'garbage bag', 'kitchen bag', 'aluminum foil', 'plastic wrap', 'parchment paper', 'paper plate', 'disposable', 'battery', 'batteries', 'light bulb', 'lightbulb', 'storage bag', 'freezer bag', 'sandwich bag', 'charmin', 'bounty', 'kirkland toilet', 'hefty', 'glad', 'ziploc']],
-  ['Grocery', null, null, ['milk', 'egg', 'cheese', 'yogurt', 'butter', 'bread', 'bagel', 'tortilla', 'chicken', 'beef', 'pork', 'turkey', 'bacon', 'sausage', 'salmon', 'shrimp', 'tuna', 'banana', 'apple', 'strawberry', 'blueberry', 'grape', 'avocado', 'tomato', 'potato', 'onion', 'lettuce', 'spinach', 'salad', 'broccoli', 'carrot', 'rice', 'pasta', 'cereal', 'oatmeal', 'flour', 'sugar', 'coffee', 'tea', 'juice', 'water', 'soda', 'sparkling', 'snack', 'chip', 'cracker', 'cookie', 'chocolate', 'candy', 'nut', 'almond', 'cashew', 'peanut', 'granola', 'protein bar', 'soup', 'broth', 'sauce', 'ketchup', 'mustard', 'mayonnaise', 'olive oil', 'cooking oil', 'vinegar', 'seasoning', 'spice', 'honey', 'jam', 'pizza', 'frozen', 'muffin', 'croissant', 'donut', 'cake', 'pie', 'beer', 'wine', 'rotisserie', 'kombucha', 'creamer', 'hummus', 'salsa', 'fruit', 'vegetable', 'berries', 'kiwi', 'nectarine', 'peach', 'pear', 'plum', 'mango', 'orange', 'lemon', 'lime', 'melon', 'cherry', 'clementine', 'mandarin', 'sprout', 'cabbage', 'cucumber', 'pepper', 'mushroom', 'garlic', 'corn', 'bean']],
+  ['Grocery', null, null, ['milk', 'egg', 'cheese', 'yogurt', 'butter', 'bread', 'bagel', 'tortilla', 'chicken', 'beef', 'pork', 'turkey', 'bacon', 'sausage', 'salmon', 'shrimp', 'tuna', 'banana', 'apple', 'strawberry', 'blueberry', 'grape', 'avocado', 'tomato', 'potato', 'onion', 'lettuce', 'spinach', 'salad', 'broccoli', 'carrot', 'rice', 'pasta', 'cereal', 'oatmeal', 'flour', 'sugar', 'coffee', 'tea', 'juice', 'water', 'soda', 'sparkling', 'snack', 'chip', 'cracker', 'cookie', 'chocolate', 'candy', 'nut', 'almond', 'cashew', 'peanut', 'granola', 'protein bar', 'soup', 'broth', 'sauce', 'ketchup', 'mustard', 'mayonnaise', 'olive oil', 'cooking oil', 'vinegar', 'seasoning', 'spice', 'honey', 'jam', 'pizza', 'frozen', 'muffin', 'croissant', 'donut', 'cake', 'pie', 'beer', 'wine', 'rotisserie', 'kombucha', 'creamer', 'hummus', 'salsa', 'fruit', 'vegetable', 'berries', 'kiwi', 'nectarine', 'peach', 'pear', 'plum', 'mango', 'orange', 'lemon', 'lime', 'melon', 'cherry', 'clementine', 'mandarin', 'sprout', 'cabbage', 'cucumber', 'pepper', 'mushroom', 'garlic', 'corn', 'bean', 'persimmon', 'sweet potato', 'yam', 'squash', 'zucchini', 'celery', 'kale', 'asparagus', 'cauliflower', 'eggplant', 'beet', 'radish', 'okra', 'leek', 'scallion', 'green onion', 'shallot', 'ginger', 'cilantro', 'parsley', 'basil', 'herb', 'jalapeno', 'pomegranate', 'papaya', 'pineapple', 'watermelon', 'cantaloupe', 'honeydew', 'raspberry', 'blackberry', 'cranberry', 'apricot', 'grapefruit', 'tangerine', 'coconut', 'guava', 'lychee', 'plantain', 'tofu', 'noodle', 'ramen', 'oat', 'quinoa', 'lentil', 'chickpea', 'ice cream', 'whipping cream', 'sour cream', 'ground beef', 'lamb', 'cod', 'tilapia', 'sardine', 'crab', 'lobster', 'salami', 'pickle', 'grocery', 'dairy', 'seafood', 'poultry', 'bakery', 'deli', 'paneer', 'ghee', 'atta', 'dal', 'masala', 'pistachio', 'walnut', 'pecan', 'raisin', 'trail mix', 'popcorn', 'pretzel', 'syrup']],
   ['Bath & Personal Care', '22', '15', ['shampoo', 'conditioner', 'body wash', 'hand soap', 'soap', 'toothpaste', 'toothbrush', 'mouthwash', 'floss', 'deodorant', 'razor', 'shaving', 'lotion', 'sunscreen', 'cosmetic', 'makeup', 'hair dryer', 'feminine', 'tampon', 'cotton swab', 'cotton ball']],
   ['Health & Medicine', null, null, ['vitamin', 'supplement', 'ibuprofen', 'acetaminophen', 'allergy', 'antacid', 'bandage', 'first aid', 'probiotic', 'melatonin', 'pain relief', 'cold flu', 'thermometer', 'prescription', 'pharmacy', 'fish oil']],
   ['Kitchen & Dining', '22', '15', ['kettle', 'cookware', 'frying pan', 'skillet', 'saucepan', 'baking sheet', 'utensil', 'silverware', 'flatware', 'cutlery', 'knife set', 'cutting board', 'dinnerware', 'drinkware', 'mug', 'glassware', 'food storage', 'mixing bowl', 'can opener', 'coffee filter', 'dish rack', 'bakeware', 'measuring cup']],
@@ -38,7 +39,9 @@ const LEARN_MIN_EVIDENCE = 2; // corrected items needed before a word counts
 const LEARN_MIN_SHARE = 0.6; // how clearly those words point at one category
 
 const singular = (word) =>
-  word.length > 3 && word.endsWith('ies')
+  word.length >= 7 && word.endsWith('oes')
+    ? word.slice(0, -2)
+    : word.length > 3 && word.endsWith('ies')
     ? `${word.slice(0, -3)}y`
     : word.length > 3 && word.endsWith('s') && !word.endsWith('ss')
       ? word.slice(0, -1)
@@ -77,8 +80,10 @@ const wordsOf = (name) =>
     .filter((word) => word.length >= 3 && !/\d/.test(word) && !STOP_WORDS.has(word));
 
 // overrides: [{ name, category }]. Builds what the corrections teach, then classifies.
-function createClassifier(overrides) {
+// sorted: [{ name, category }] chosen by Claude for names nothing else placed.
+function createClassifier(overrides, sorted = []) {
   const exact = new Map();
+  const bySorter = new Map(sorted.filter((s) => s.category).map((s) => [nameKey(s.name), s.category]));
   const wordCounts = new Map(); // word -> Map(category -> number of corrected items)
   for (const { name, category } of overrides) {
     exact.set(nameKey(name), category);
@@ -112,6 +117,8 @@ function createClassifier(overrides) {
     if (fromCorrections) return { category: fromCorrections, source: 'learned' };
     const rule = ruleMatch(name);
     if (rule) return { category: rule.category, source: 'rule' };
+    const fromSorter = bySorter.get(nameKey(name));
+    if (fromSorter) return { category: fromSorter, source: 'ai' };
     if (STORE_HINTS[store]) return { category: STORE_HINTS[store], source: 'store' };
     return { category: UNCATEGORIZED, source: 'none' };
   };

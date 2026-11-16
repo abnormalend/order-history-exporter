@@ -17,6 +17,9 @@ import { correlationService } from './correlate/service';
 import { cpaService } from './cpa/service';
 import { cpaRoutes } from './routes/cpa';
 import { claudeReader } from './receipts/reader';
+import { claudeSorter } from './items/sorter';
+import type { ItemSorter } from './items/sorter';
+import { itemSortRoutes } from './routes/itemsort';
 import type { ReceiptReader } from './receipts/reader';
 import { receiptService } from './receipts/service';
 import type { ReceiptService } from './receipts/service';
@@ -70,6 +73,7 @@ export interface AppOptions {
   dataDir?: string | null;
   // For tests, in place of Claude.
   receiptReader?: ReceiptReader;
+  itemSorter?: ItemSorter;
 }
 
 declare module 'fastify' {
@@ -198,7 +202,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   }
   // Item categories decide how linked charges split, so a change there flows through.
   app.addHook('onResponse', async (request, reply) => {
-    if (request.method === 'POST' && reply.statusCode < 400 && /^\/api\/(items\/(category|status)|categories)/.test(request.url)) correlate.refreshLinked();
+    if (request.method === 'POST' && reply.statusCode < 400 && /^\/api\/(items\/(category|status|auto-sort)|categories)/.test(request.url)) correlate.refreshLinked();
   });
 
   // Stays from Hospitable, and the deposits that paid for them.
@@ -218,6 +222,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   cpaRoutes(app, cpaService({ raw: db.raw, db, bank, correlate, receipts }), correlate);
   receiptRoutes(app, receipts, categoryNames);
   reportRoutes(app, db, () => bank.applyRules());
+  itemSortRoutes(app, db, options.itemSorter ?? claudeSorter(() => receipts!.apiKey()), () => Boolean(receipts!.apiKey()));
   stayRoutes(app, stays);
   // Leases, and new rent at the bank matched to them by the tenant's name.
   const leases = leaseService({ db: db.raw, bank });

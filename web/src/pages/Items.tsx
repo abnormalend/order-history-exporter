@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Download } from 'lucide-react';
+import { Download, Sparkles } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { download, post, useApi } from '../api';
 import { FilterBar, useFilters } from '../filters';
 import type { Meta } from '../filters';
@@ -8,7 +9,7 @@ import { Banner, Button, Card, Confirm, Empty, Field, Loading, PageHeader, Pager
 
 const PAGE = 50;
 const STATUS_LABELS: Record<string, string> = { unreviewed: 'Not reviewed', business: 'Business', personal: 'Personal' };
-const SOURCE_NOTES: Record<string, string> = { rule: 'Guessed from the name', learned: 'Learned from your changes', store: 'Guessed from the store' };
+const SOURCE_NOTES: Record<string, string> = { rule: 'Guessed from the name', learned: 'Learned from your changes', store: 'Guessed from the store', ai: 'Sorted by Claude' };
 
 export function Items({ meta, onMetaChange }: { meta: Meta | null; onMetaChange: () => void }) {
   const filters = useFilters();
@@ -93,6 +94,7 @@ export function Items({ meta, onMetaChange }: { meta: Meta | null; onMetaChange:
         }
       />
       <FilterBar meta={meta} />
+      <AutoSort onDone={reload} />
       {(error || actionError) && <Banner>{error?.message || actionError}</Banner>}
       {note && <Banner tone="info">{note}</Banner>}
 
@@ -194,5 +196,88 @@ export function Items({ meta, onMetaChange }: { meta: Meta | null; onMetaChange:
         Every item matching the current filters will be marked {bulk}. Your tax groups use this. You can change any item back later.
       </Confirm>
     </>
+  );
+}
+
+interface SortStatus {
+  waiting: number;
+  unsure: number;
+  sorted: number;
+  hasKey: boolean;
+  running: boolean;
+}
+
+// Items the keyword rules couldn't place, sorted by Claude on request. Anything it
+// isn't sure about stays Uncategorized for you to choose.
+function AutoSort({ onDone }: { onDone: () => void }) {
+  const { data, reload } = useApi<SortStatus>('/api/items/auto-sort');
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState('');
+  const [result, setResult] = useState('');
+  if (!data || (!data.waiting && !data.unsure && !result)) return null;
+
+  async function run(retryUnsure = false) {
+    setBusy(true);
+    setProblem('');
+    setResult('');
+    try {
+      const r = await post<{ asked: number; sortedNow: number; unsureNow: number; status: SortStatus }>('/api/items/auto-sort', { retryUnsure });
+      setResult(
+        `Claude sorted ${plural(r.sortedNow, 'item name')}${r.unsureNow ? ` and wasn't sure about ${r.unsureNow}` : ''}.${r.status.waiting ? ` ${plural(r.status.waiting, 'more')} to go: press Sort again.` : ''}`
+      );
+      reload();
+      onDone();
+    } catch (e) {
+      setProblem((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 px-4 py-3 text-sm dark:border-violet-900 dark:bg-violet-950/50">
+      <div className="flex flex-wrap items-center gap-3">
+        <Sparkles className="size-4 shrink-0 text-violet-600 dark:text-violet-400" aria-hidden />
+        <div className="min-w-0 flex-1">
+          {data.waiting > 0 ? (
+            <span>
+              <strong>{plural(data.waiting, 'item name')}</strong> {data.waiting === 1 ? 'has' : 'have'} no category, or only a guess from the store.
+            </span>
+          ) : (
+            <span>Every item name has been looked at.</span>
+          )}
+          {data.unsure > 0 && (
+            <span className="text-slate-600 dark:text-slate-300">
+              {' '}
+              Claude wasn't sure about {data.unsure}: pick <Link to="/items?category=Uncategorized" className="underline">Uncategorized</Link> to do those yourself.
+            </span>
+          )}
+        </div>
+        {data.hasKey ? (
+          <div className="flex flex-wrap gap-2">
+            {data.waiting > 0 && (
+              <Button variant="primary" busy={busy} onClick={() => run()}>
+                Sort them with Claude
+              </Button>
+            )}
+            {data.unsure > 0 && (
+              <Button busy={busy} onClick={() => run(true)} title="For after you add a category that might fit them">
+                Ask again about unsure ones
+              </Button>
+            )}
+          </div>
+        ) : (
+          <Link to="/settings" className="text-violet-700 underline dark:text-violet-300">
+            Add an Anthropic API key in Settings to sort them
+          </Link>
+        )}
+      </div>
+      {busy && <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">Sorting… this takes a few seconds per hundred names.</p>}
+      {result && <p className="mt-2 text-emerald-800 dark:text-emerald-300">{result}</p>}
+      {problem && <p className="mt-2 text-red-700 dark:text-red-400">{problem}</p>}
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Only the item names and your category names are sent to Anthropic, using your own API key. Your own choices always win: change any item and similar names learn from it.
+      </p>
+    </div>
   );
 }

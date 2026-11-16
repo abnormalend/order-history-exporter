@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 28;
+const SCHEMA_VERSION = 29;
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -602,6 +602,18 @@ const SCHEMA_V26 = `
     ('University fees', 'education', strftime('%Y-%m-%dT%H:%M:%fZ'));
 `;
 
+// Item names the keyword rules couldn't place, sorted by Claude when asked: its
+// category, or none when it wasn't sure (so it isn't asked again unless the user wants).
+const SCHEMA_V29 = `
+  CREATE TABLE item_sorted (
+    name_key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT,
+    model TEXT,
+    created_at TEXT NOT NULL
+  );
+`;
+
 // Categories can be income as well as expenses: money in under an income category is
 // revenue, while money in under an expense category is a refund of that spending.
 const SCHEMA_V28 = `
@@ -929,6 +941,7 @@ function migrate(db, file) {
     if (version < 26) db.exec(SCHEMA_V26);
     if (version < 27) db.exec(SCHEMA_V27);
     if (version < 28) db.exec(SCHEMA_V28);
+    if (version < 29) db.exec(SCHEMA_V29);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
@@ -1117,7 +1130,7 @@ function openDatabase(file) {
   let classifier = null;
   function classify(name, store) {
     if (!classifier) {
-      classifier = createClassifier(db.prepare('SELECT name, category FROM category_overrides').all());
+      classifier = createClassifier(db.prepare('SELECT name, category FROM category_overrides').all(), db.prepare('SELECT name, category FROM item_sorted WHERE category IS NOT NULL').all());
     }
     return classifier(name, store);
   }
@@ -1127,6 +1140,56 @@ function openDatabase(file) {
       .prepare('SELECT name, schedule_c, schedule_e, form_1065, form_8825, expense_class FROM categories ORDER BY position')
       .all()
       .map((row) => ({ name: row.name, scheduleC: row.schedule_c, scheduleE: row.schedule_e, form1065: row.form_1065, form8825: row.form_8825, expenseClass: row.expense_class }));
+  }
+
+  // Item names nothing places yet (or only the store guesses), one per name, that
+  // Claude hasn't been asked about.
+  function itemsToSort() {
+    const asked = new Set(db.prepare('SELECT name_key FROM item_sorted').all().map((r) => r.name_key));
+    const seen = new Set();
+    const out = [];
+    for (const row of db.prepare("SELECT name, store FROM items WHERE name IS NOT NULL AND TRIM(name) != '' ORDER BY id DESC").all()) {
+      const key = nameKey(row.name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      if (asked.has(key)) continue;
+      const { source } = classify(row.name, row.store);
+      if (source === 'none' || source === 'store') out.push(row.name);
+    }
+    return out;
+  }
+
+  function saveSortedItems(rows, model) {
+    const save = db.prepare(
+      'INSERT INTO item_sorted (name_key, name, category, model, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (name_key) DO UPDATE SET category = excluded.category, model = excluded.model, created_at = excluded.created_at'
+    );
+    const at = new Date().toISOString();
+    for (const { name, category } of rows) {
+      const key = nameKey(name);
+      if (key) save.run(key, name, category ?? null, model ?? null, at);
+    }
+    classifier = null;
+  }
+
+  // Names Claude wasn't sure about and nobody has categorised since.
+  function unsureItems() {
+    return db
+      .prepare('SELECT s.name_key FROM item_sorted s WHERE s.category IS NULL AND NOT EXISTS (SELECT 1 FROM category_overrides o WHERE o.name_key = s.name_key)')
+      .all()
+      .map((r) => r.name_key);
+  }
+  function forgetUnsureItems() {
+    const keys = unsureItems();
+    const drop = db.prepare('DELETE FROM item_sorted WHERE name_key = ?');
+    for (const key of keys) drop.run(key);
+    classifier = null;
+  }
+  function itemSortStatus() {
+    return {
+      waiting: itemsToSort().length,
+      unsure: unsureItems().length,
+      sorted: db.prepare('SELECT COUNT(*) AS n FROM item_sorted WHERE category IS NOT NULL').get().n,
+    };
   }
 
   // Sets a category for every item with this name, and teaches similar names.
@@ -1632,6 +1695,10 @@ function openDatabase(file) {
     status,
     categoryList,
     setItemCategory,
+    itemsToSort,
+    saveSortedItems,
+    forgetUnsureItems,
+    itemSortStatus,
     saveCategory,
     taxRules,
     saveTaxRule,
