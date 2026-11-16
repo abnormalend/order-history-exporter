@@ -232,3 +232,41 @@ test('entities: from the delivery place, the account, a rule, or shared by hand'
   assert.equal(rule.sharedEntities, null);
   assert.equal(rule.entityId, consulting);
 });
+
+test('an order charged weeks later, as Subscribe & Save is, is matched only on the card it names', async () => {
+  const sync = (orders) =>
+    fetch(`${base}/api/orders`, { method: 'POST', headers: { 'content-type': 'application/json', Authorization: 'Bearer tok' }, body: JSON.stringify({ store: 'amazon', orders }) });
+  await sync([
+    { orderId: 'S1', date: '2026-05-01', total: 89.45, payment: 'Visa ending 4321', items: [{ name: 'Vitamin D3 Softgels', price: 89.45 }] },
+    { orderId: 'S2', date: '2026-05-01', total: 12.34, payment: 'Mastercard ending 9999', items: [{ name: 'Lens Wipes', price: 12.34 }] },
+    { orderId: 'S3', date: '2026-05-01', total: 7.77, items: [{ name: 'Gift Bag', price: 7.77 }] },
+  ]);
+  const visa = (await get('/api/bank/accounts')).accounts.find((a) => a.name === 'Business Visa');
+  const late = [
+    ['20260517', '-89.45', 'AMZN Mktp US*SUB111'],
+    ['20260517', '-12.34', 'AMZN Mktp US*SUB222'],
+    ['20260517', '-7.77', 'AMZN Mktp US*SUB333'],
+  ];
+  await post('/api/bank/import', {
+    content: `OFXHEADER:100\n<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>USD<CCACCTFROM><ACCTID>4111111111114321</CCACCTFROM><BANKTRANLIST>
+${late.map(([d, a, n], i) => `<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>${d}<TRNAMT>${a}<FITID>L${i}<NAME>${n}</STMTTRN>`).join('\n')}
+</BANKTRANLIST></CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>`,
+    fileName: 'late.qfx',
+    accountId: visa.id,
+  });
+  // 16 days on, on the card the order names: linked.
+  assert.deepEqual((await charge('SUB111'))[0].orders.map((o) => o.orderId), ['S1']);
+  // As late, on another card or with no card known: left for the user.
+  assert.deepEqual((await charge('SUB222'))[0].orders, []);
+  assert.deepEqual((await charge('SUB333'))[0].orders, []);
+
+  // A bank feed may give no last four; the account's name ending "(5555)" is enough.
+  await sync([{ orderId: 'S4', date: '2026-06-01', total: 23.45, payment: 'Visa ending 5555', items: [{ name: 'Fish Oil', price: 23.45 }] }]);
+  await post('/api/bank/import', {
+    content: 'Date,Description,Amount\n06/18/2026,AMZN Mktp US*SUB444,-23.45\n',
+    fileName: 'feed.csv',
+    newAccount: { name: 'Store Rewards Visa (5555)', kind: 'credit', owner: 'business' },
+  });
+  assert.equal((await get('/api/bank/accounts')).accounts.find((a) => a.name === 'Store Rewards Visa (5555)').last4, null);
+  assert.deepEqual((await charge('SUB444'))[0].orders.map((o) => o.orderId), ['S4']);
+});

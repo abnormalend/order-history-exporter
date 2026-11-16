@@ -14,6 +14,9 @@ type Row = Record<string, any>;
 const DAY_MS = 86400000;
 const BEFORE_ORDER_DAYS = 2; // a charge can post a little before the order date shows
 const AFTER_ORDER_DAYS = 14; // stores charge when they ship
+// Subscribe & Save and other orders placed ahead are charged when they ship, which can be
+// a couple of weeks on; that late, only a charge on the card the order names is taken.
+const AFTER_ORDER_SAME_CARD_DAYS = 21;
 const MAX_SHIPMENTS = 4;
 const STORES = Object.keys(ORDER_STORE_PAYEES);
 export const ENTITY_KINDS = ['business', 'rental', 'other'] as const;
@@ -37,6 +40,9 @@ const now = () => new Date().toISOString();
 const dayNumber = (date: string) => Math.round(Date.parse(`${date}T00:00:00Z`) / DAY_MS);
 const orderKey = (store: string, orderId: string) => `${store}\u0000${orderId}`;
 const cents = (n: number) => Math.round(n * 100) / 100;
+// Bank feeds often leave the card's last four unset; the account name usually ends "(1234)".
+const accountCard = (last4: unknown, name: unknown) =>
+  (last4 as string | null) || (String(name || '').match(/\((\d{4})\)\s*$/) || [])[1] || null;
 const lastFour = (payment: string | null) => (String(payment || '').match(/(\d{4})(?!.*\d{4})/) || [])[1] ?? null;
 
 export interface SpendLine {
@@ -267,12 +273,13 @@ export function correlationService({ db, bank }: { db: OrdersDb; bank: BankStore
     const payees = [...new Set(Object.values(ORDER_STORE_PAYEES).flat())];
     const charges = raw
       .prepare(
-        `SELECT t.id, t.posted, t.amount, t.payee, a.last4 FROM bank_transactions t JOIN bank_accounts a ON a.id = t.account_id
+        `SELECT t.id, t.posted, t.amount, t.payee, a.last4, a.name AS account_name FROM bank_transactions t JOIN bank_accounts a ON a.id = t.account_id
          WHERE t.amount < 0 AND t.kind != 'transfer' AND t.payee IN (${payees.map(() => '?').join(', ')})
            AND NOT EXISTS (SELECT 1 FROM order_links l WHERE l.transaction_id = t.id)
          ORDER BY t.posted, t.id`
       )
-      .all(...payees) as Row[];
+      .all(...payees)
+      .map((c) => ({ ...c, last4: accountCard(c.last4, c.account_name) })) as Row[];
     if (!charges.length) return 0;
     const earliest = charges[0].posted as string;
     const orders = raw
@@ -282,7 +289,7 @@ export function correlationService({ db, bank }: { db: OrdersDb; bank: BankStore
            AND NOT EXISTS (SELECT 1 FROM order_links l WHERE l.store = o.store AND l.order_id = o.order_id)
          ORDER BY order_date, order_id`
       )
-      .all(new Date((dayNumber(earliest) - AFTER_ORDER_DAYS) * DAY_MS).toISOString().slice(0, 10), ...STORES) as Row[];
+      .all(new Date((dayNumber(earliest) - AFTER_ORDER_SAME_CARD_DAYS) * DAY_MS).toISOString().slice(0, 10), ...STORES) as Row[];
     const rejected = new Set((raw.prepare('SELECT transaction_id, store, order_id FROM order_link_rejections').all() as Row[]).map((r) => `${r.transaction_id}|${r.store}|${r.order_id}`));
     const used = new Set<number>();
     const linked: number[] = [];
@@ -291,7 +298,9 @@ export function correlationService({ db, bank }: { db: OrdersDb; bank: BankStore
     const orderKeyOf = (o: Row) => `${o.store}|${o.order_id}`;
     const window = (charge: Row, order: Row) => {
       const offset = dayNumber(charge.posted) - dayNumber(order.order_date);
-      return offset >= -BEFORE_ORDER_DAYS && offset <= AFTER_ORDER_DAYS;
+      const card = lastFour(order.payment);
+      const latest = card && charge.last4 === card ? AFTER_ORDER_SAME_CARD_DAYS : AFTER_ORDER_DAYS;
+      return offset >= -BEFORE_ORDER_DAYS && offset <= latest;
     };
     // Is this order clearly the one for this charge? Not if another open order for the
     // same amount at the same store is as close (or closer) in date: then two orders
