@@ -7,6 +7,11 @@
   // Recommendation carousels ("Customers also bought", "Inspired by your order") load
   // into the order page after it opens, and are full of product links.
   const NOT_PURCHASED = '[data-component="personalization"], [class*="carousel"], [cel_widget_id*="p13n"], [id^="CardInstance"]';
+  // Every Amazon page also has the top bar, a side cart and a footer of ads for Amazon's
+  // own cards. If those are all a page shows yet, the order itself hasn't been drawn.
+  const PAGE_CHROME = '#navbar, #nav-main, header, [id^="nav-flyout"], [id*="ewc"], [class*="ewc-"], #navFooter, footer, #rhf, [id^="rhf"]';
+  const CHROME_LINK = /[?&/]ref_?=(?:footer|ewc|nav)_?/i;
+  const isChrome = (el) => Boolean(el.closest(PAGE_CHROME)) || CHROME_LINK.test(el.getAttribute('href') || '');
   const NOT_A_TITLE = /^(buy it again|view your item|write a product review|track package|return|problem with)/i;
 
   const listUrl = (year) => `${ORIGIN}/your-orders/orders?timeFilter=year-${year}`;
@@ -16,7 +21,7 @@
     // A details page marks what was bought; anything else there is a suggestion.
     const bought = [...root.querySelectorAll('[data-component="purchasedItems"]')];
     const scopes = bought.length ? bought : [root];
-    const links = scopes.flatMap((scope) => [...scope.querySelectorAll(ITEM_LINK)]).filter((link) => !link.closest(NOT_PURCHASED));
+    const links = scopes.flatMap((scope) => [...scope.querySelectorAll(ITEM_LINK)]).filter((link) => !link.closest(NOT_PURCHASED) && !isChrome(link));
     const isOtherItem = (el, self) => links.some((l) => l !== self && el.contains(l) && asinOf(l.href) !== asinOf(self.href));
     const items = new Map();
     for (const link of links) {
@@ -90,10 +95,11 @@
 
     extractDetail(doc) {
       const root = doc.querySelector('#orderDetails') || doc.querySelector('main') || doc.body;
-      const totals = doc.querySelector('[id*="od-subtotals"]') || root;
+      // Without the order's own sections, the side cart's subtotal is the only one there.
+      const totals = doc.querySelector('[id*="od-subtotals"]') || (root === doc.body ? null : root);
       const addressBlock = doc.querySelector('[data-component="shippingAddress"]');
       const address = (addressBlock && OHE.dom.parseAddress(text(addressBlock))) || OHE.dom.deliveryAddress(doc.body);
-      return { ...summary(totals), ...address, payment: payment(doc.body), items: readItems(root, true) };
+      return { ...(totals ? summary(totals) : {}), ...address, payment: payment(doc.body), items: readItems(root, true) };
     },
   });
 })(globalThis);

@@ -8,7 +8,13 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 29;
+const SCHEMA_VERSION = 30;
+
+// Links from Amazon's top bar, side cart and footer (its own card ads among them), which
+// a details page read too early can mistake for the items bought.
+const PAGE_CHROME = /amazon\.com\/.*[?&/]ref_?=(?:footer|ewc|nav)_?/i;
+const isPageChrome = (url) => typeof url === 'string' && PAGE_CHROME.test(url);
+const PAGE_CHROME_SQL = "url LIKE '%amazon.com/%' AND (url GLOB '*ref_=footer*' OR url GLOB '*ref=footer*' OR url GLOB '*ref=ewc*' OR url GLOB '*ref_=ewc*' OR url GLOB '*ref_=nav*' OR url GLOB '*ref=nav*')";
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -942,6 +948,15 @@ function migrate(db, file) {
     if (version < 27) db.exec(SCHEMA_V27);
     if (version < 28) db.exec(SCHEMA_V28);
     if (version < 29) db.exec(SCHEMA_V29);
+    // Some Amazon details pages were read before the order had been drawn, so the side
+    // cart and footer ads were saved as the items, with the side cart's subtotal. Those
+    // rows go, and the orders are read again on the next sync.
+    if (version >= 1 && version < 30) {
+      const marked = `SELECT DISTINCT store, order_id FROM items WHERE ${PAGE_CHROME_SQL}`;
+      db.exec(`UPDATE orders SET detail_fetched_at = NULL, detail_attempts = 0, subtotal = NULL, list_fingerprint = NULL
+               WHERE (store, order_id) IN (${marked})`);
+      db.exec(`DELETE FROM items WHERE (store, order_id) IN (${marked})`);
+    }
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
@@ -1044,7 +1059,7 @@ function openDatabase(file) {
 
         // List pages often give thinner item rows than a details page, so they only
         // replace items when they add something.
-        const items = order.items || [];
+        const items = (order.items || []).filter((item) => !isPageChrome(item.url));
         if (items.length) {
           const known = countItems.get(store, orderId).n;
           const detailed = existing && existing.detail_fetched_at;

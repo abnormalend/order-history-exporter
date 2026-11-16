@@ -547,14 +547,14 @@ test('upgrading an older database keeps its orders, backs it up, and queues miss
 
   const upgraded = openDatabase(file);
   assert.equal(upgraded.listOrders({}).total, 3);
-  assert.ok(fs.existsSync(`${file}.before-v29.bak`), 'a backup was made first');
+  assert.ok(fs.existsSync(`${file}.before-v30.bak`), 'a backup was made first');
   const pending = upgraded.syncPlan('samsclub', { from: null, to: null }).pendingDetails.map((o) => o.orderId);
   assert.deepEqual(pending, ['NOPRICE'], 'only orders missing prices are read again');
   assert.equal(upgraded.syncPlan('ebay', { from: null, to: null }).pendingDetails.length, 0);
   assert.ok(upgraded.categoryList().some((c) => c.name === 'Cleaning Supplies'));
   upgraded.close();
 
-  const backup = new DatabaseSync(`${file}.before-v29.bak`, { readOnly: true });
+  const backup = new DatabaseSync(`${file}.before-v30.bak`, { readOnly: true });
   assert.equal(backup.prepare('SELECT COUNT(*) AS n FROM orders').get().n, 3);
   backup.close();
 });
@@ -593,6 +593,41 @@ test('upgrading to v4 queues Amazon details to be read again', () => {
   // The next details read replaces the items.
   second.saveOrders('amazon', [{ orderId: 'A', detailRead: true, items: [{ name: 'Kettle' }] }]);
   assert.equal(second.raw.prepare('SELECT COUNT(*) n FROM items WHERE order_id = ?').get('A').n, 1);
+  second.close();
+});
+
+test('upgrading to v30 drops Amazon page links saved as items and reads those orders again', () => {
+  const file = path.join(dir, 'v29.db');
+  const first = openDatabase(file);
+  first.saveOrders('amazon', [
+    { orderId: 'BAD', date: '2025-05-01', total: 84.74, subtotal: 30, detailUrl: 'https://www.amazon.com/gp/your-account/order-details?orderID=BAD', detailRead: true },
+    { orderId: 'GOOD', date: '2025-05-02', total: 12, subtotal: 11, detailRead: true, items: [{ name: 'Kettle', price: 11, url: 'https://www.amazon.com/gp/product/B000000001/ref=ppx_yo_dt_b_asin_title' }] },
+  ]);
+  first.close();
+  const raw = new DatabaseSync(file);
+  // How an early read of the page saved it: the side cart and the footer's card ads.
+  const add = raw.prepare("INSERT INTO items (store, order_id, position, name, price, url) VALUES ('amazon', 'BAD', ?, ?, ?, ?)");
+  add.run(0, 'Example Crew Socks', 30, 'https://www.amazon.com/gp/product/B000000002/ref=ewc_title_delete1?smid=X&psc=1');
+  add.run(1, 'Amazon Secured Card', null, 'https://www.amazon.com/dp/product/B000000003?plattr=SCFOOT&ref_=footer_ACB');
+  add.run(2, 'Amazon Business Card', null, 'https://www.amazon.com/dp/B000000004?plattr=ACOMFO&ie=UTF-8&ref_=footer_pay_sbcc');
+  raw.exec('PRAGMA user_version = 29');
+  raw.close();
+
+  const second = openDatabase(file);
+  const order = (id) => second.raw.prepare("SELECT detail_fetched_at, subtotal, total FROM orders WHERE store = 'amazon' AND order_id = ?").get(id);
+  const names = (id) => second.raw.prepare("SELECT name FROM items WHERE store = 'amazon' AND order_id = ? ORDER BY position").all(id).map((r) => r.name);
+  assert.deepEqual(names('BAD'), []);
+  assert.deepEqual([order('BAD').detail_fetched_at, order('BAD').subtotal, order('BAD').total], [null, null, 84.74], "the side cart's subtotal goes, the order total stays");
+  assert.deepEqual(names('GOOD'), ['Kettle']);
+  assert.ok(order('GOOD').detail_fetched_at, 'orders read properly are left alone');
+  assert.deepEqual(second.syncPlan('amazon', { from: '2025-01-01', to: '2025-12-31' }).pendingDetails.map((o) => o.orderId), ['BAD']);
+
+  // An extension that still sends them can't put them back.
+  second.saveOrders('amazon', [{ orderId: 'BAD', detailRead: true, items: [
+    { name: 'Amazon Secured Card', url: 'https://www.amazon.com/dp/product/B000000003?plattr=SCFOOT&ref_=footer_ACB' },
+    { name: 'Desk Lamp', price: 84.74, url: 'https://www.amazon.com/gp/product/B000000005/ref=ppx_yo_dt_b_asin_title' },
+  ] }]);
+  assert.deepEqual(names('BAD'), ['Desk Lamp']);
   second.close();
 });
 

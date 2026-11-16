@@ -164,6 +164,30 @@ test('amazon detail: summary rows and item prices', () => {
   assert.equal(patch.items[0].seller, 'Kettle Co');
 });
 
+// Before the order is drawn, an Amazon details page holds only the top bar, the side
+// cart and the footer, whose links (Amazon's own card ads among them) are not items bought.
+const AMAZON_CHROME = `<header id="navbar"><a href="/gp/product/B000000009/ref=nav_x">Today's Deals</a></header>
+  <div id="nav-flyout-ewc"><div id="ewc-content"><a href="/gp/product/B000000002/ref=ewc_title_delete1?psc=1">Example Crew Socks (6 Pairs)</a>
+    <span class="a-price"><span class="a-offscreen">$30.00</span></span><div>Subtotal $30.00</div></div></div>
+  <div id="navFooter"><a href="/dp/product/B000000003?plattr=SCFOOT&amp;ref_=footer_ACB">Amazon Secured Card</a>
+    <a href="/dp/B000000004?plattr=ACOMFO&amp;ref_=footer_pay_sbcc">Amazon Business Card</a></div>`;
+
+test('amazon detail: the top bar, side cart and footer are not the order', async () => {
+  const early = load(`<!doctype html><body>${AMAZON_CHROME}</body>`, 'https://www.amazon.com/gp/your-account/order-details?orderID=111-0000000-0000001');
+  const patch = plain(early.OHE.stores.amazon.extractDetail(early.document));
+  assert.deepEqual(patch.items, []);
+  assert.equal(patch.subtotal, undefined, "the side cart's subtotal is not the order's");
+  // So the page isn't taken as read yet; given time and nothing more, it's reported unread.
+  assert.equal((await early.OHE.run({ storeId: 'amazon', mode: 'detail', order: {}, today: CTX.today, timeoutMs: 50 })).status, 'unparsed');
+
+  // Once the order is drawn, only its items are read.
+  const drawn = load(fixture('amazon-detail').replace('<body>', `<body>${AMAZON_CHROME}`));
+  const read = plain(drawn.OHE.stores.amazon.extractDetail(drawn.document));
+  assert.equal(read.items.length, 2);
+  assert.ok(!read.items.some((item) => /Card|Socks/.test(item.name)));
+  assert.equal(read.subtotal, 1012);
+});
+
 test('amazon detects sign-in and captcha', () => {
   const win = load();
   const store = win.OHE.stores.amazon;
