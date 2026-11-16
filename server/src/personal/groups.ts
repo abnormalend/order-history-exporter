@@ -19,9 +19,12 @@ const MOVES: [RegExp, MoveGroup | ((amount: number) => MoveGroup)][] = [
   [/online (banking )?transfer (to|from)|ext trnsfr|citixfr|transfer (to|from) (chk|sav|checking|savings)|real time payment credit/i, 'between'],
 ];
 
+// A tax refund from the IRS or a state ("IRS TREAS 310 TAX REF", "ILSTTAXRFD").
+const TAX_REFUND = /tax ?ref|taxrfd|treas 310|tax refund/i;
+
 // Money in.
 const INCOME: [RegExp, IncomeGroup][] = [
-  [/tax ?ref|taxrfd|treas 310|tax refund/i, 'refunds'],
+  [TAX_REFUND, 'refunds'],
   [/payroll|direct ?dep|direct-pay|salary|dfas|defense finance/i, 'pay'],
   [/navan|claim|via benefits|reimburs|expense report|corporation payments/i, 'reimbursed'],
   [/refund|return|reversal|credit voucher/i, 'refunds'],
@@ -130,6 +133,11 @@ export function classify(
     if (PAY_NAME.test(category)) return { flow: 'in', group: 'pay', guessed: false };
     for (const [pattern, group] of INCOME) if (pattern.test(text)) return { flow: 'in', group, guessed: false };
     return { flow: 'in', group: 'other_in', guessed: false };
+  }
+  // A tax refund is money in, even filed under Refunds & Returns or a tax category,
+  // which would otherwise take it for money back on spending.
+  if (tx.amount > 0 && TAX_REFUND.test(text) && !(category && flowOf(BY_CATEGORY[category] ?? 'other') === 'in')) {
+    return { flow: 'in', group: 'refunds', guessed: !category };
   }
   if (category === 'Refunds & Returns' || (tx.amount > 0 && category && flowOf(BY_CATEGORY[category] ?? 'other') === 'out')) {
     // Money back on a purchase: less spending in the group it came from.

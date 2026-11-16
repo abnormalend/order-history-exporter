@@ -98,6 +98,13 @@ test('payments are sorted into money in, money out and money moved', () => {
   assert.deepEqual(classify({ amount: 400, description: 'XYZQ', category: 'Tutoring' }, null, new Set(['Tutoring'])), { flow: 'in', group: 'other_in', guessed: false });
   assert.equal(classify({ amount: 30, description: 'XYZQ', category: 'Kids Sports' }).flow, 'out', 'money back under a spending category of their own');
   assert.equal(classify({ amount: -30, description: 'PAYPAL *SHOP', category: 'w2 salary' }).flow, 'out');
+  // A tax refund is money in, whatever spending-side category it was filed under.
+  for (const category of [null, 'Refunds & Returns', 'Taxes & Licenses']) {
+    assert.deepEqual(classify({ amount: 2300, description: 'IRS TREAS 310 DES: TAX REF ID:1', payee: 'Irs Treas', category }), { flow: 'in', group: 'refunds', guessed: !category }, String(category));
+  }
+  assert.equal(classify({ amount: 800, description: 'State of Ill ILSTTAXRFD PPD ID: 1' }).group, 'refunds');
+  assert.equal(classify({ amount: 800, description: 'IRS TREAS 310 TAX REF', category: 'Other Income' }).group, 'other_in', 'an income category the owner chose still wins');
+  assert.equal(classify({ amount: -500, description: 'IRS USATAXPYMT', category: 'Taxes & Licenses' }).group, 'taxes', 'tax paid is still spending');
   // A transfer to one of the owner's business accounts is money moved, by its last four.
   const business = businessPattern(['1234']);
   assert.deepEqual(classify({ amount: -500, description: 'Online transfer to CHK ...1234' }, business), { flow: 'move', group: 'business', guessed: true });
