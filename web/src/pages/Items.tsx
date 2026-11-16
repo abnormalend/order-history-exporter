@@ -249,7 +249,7 @@ function AutoSort({ onDone }: { onDone: () => void }) {
           {data.unsure > 0 && (
             <span className="text-slate-600 dark:text-slate-300">
               {' '}
-              Claude wasn't sure about {data.unsure}: pick <Link to="/items?category=Uncategorized" className="underline">Uncategorized</Link> to do those yourself.
+              Claude wasn't sure about {data.unsure}: pick <Link to="/items?category=Uncategorized&preset=all" className="underline">Uncategorized, all time</Link> to do those yourself.
             </span>
           )}
         </div>

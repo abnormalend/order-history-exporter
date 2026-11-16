@@ -1171,15 +1171,33 @@ function openDatabase(file) {
     classifier = null;
   }
 
-  // Names Claude wasn't sure about and nobody has categorised since.
+  // Names Claude wasn't sure about that are still Uncategorized: not categorised by
+  // the user since, and without a guess from the store, so they're all under the
+  // Uncategorized filter.
   function unsureItems() {
+    const keys = new Set(
+      db
+        .prepare('SELECT s.name_key FROM item_sorted s WHERE s.category IS NULL AND NOT EXISTS (SELECT 1 FROM category_overrides o WHERE o.name_key = s.name_key)')
+        .all()
+        .map((r) => r.name_key)
+    );
+    if (!keys.size) return [];
+    const out = new Set();
+    for (const row of db.prepare("SELECT name, store FROM items WHERE name IS NOT NULL AND TRIM(name) != ''").all()) {
+      const key = nameKey(row.name);
+      if (keys.has(key) && classify(row.name, row.store).category === UNCATEGORIZED) out.add(key);
+    }
+    return [...out];
+  }
+  // Every name Claude wasn't sure about, store guesses included, to ask again.
+  function allUnsureItems() {
     return db
       .prepare('SELECT s.name_key FROM item_sorted s WHERE s.category IS NULL AND NOT EXISTS (SELECT 1 FROM category_overrides o WHERE o.name_key = s.name_key)')
       .all()
       .map((r) => r.name_key);
   }
   function forgetUnsureItems() {
-    const keys = unsureItems();
+    const keys = allUnsureItems();
     const drop = db.prepare('DELETE FROM item_sorted WHERE name_key = ?');
     for (const key of keys) drop.run(key);
     classifier = null;

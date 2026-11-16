@@ -107,3 +107,14 @@ test('names nothing places are sorted by Claude, unsure ones are left, and your 
   assert.deepEqual([again.asked, again.sortedNow, again.unsureNow], [1, 1, 0]);
   assert.equal((await get('/api/items?category=Uncategorized&limit=50')).total, 0);
 });
+
+test('an item Claude was unsure about that keeps the store guess is not counted as Uncategorized', async () => {
+  db.saveOrders('newegg', [{ orderId: 'SORT-2', date: '2024-03-01', total: 15, detailRead: true, items: [{ name: 'Qwzy gizmo mk2', price: 15 }] }]);
+  const run = await post('/api/items/auto-sort');
+  assert.deepEqual([run.asked, run.unsureNow], [1, 1]);
+  // It still shows under the store's guess, so it isn't one to find under Uncategorized.
+  const item = (await get('/api/items?preset=all&limit=50')).items.find((i) => i.name === 'Qwzy gizmo mk2');
+  assert.deepEqual([item.category, item.categorySource], ['Electronics & Computers', 'store']);
+  assert.equal(run.status.unsure, 0);
+  assert.equal((await get('/api/items?category=Uncategorized&preset=all&limit=50')).total, run.status.unsure);
+});
