@@ -542,7 +542,27 @@ export function ShareEditor({ entities, initial, busy, onSave, onCancel }: { ent
 }
 
 // Sets choices on every selected transaction: pick any of them, then apply them together.
-export function BulkBar({ ids, categories, entities = [], onDone }: { ids: number[]; categories: string[]; entities?: Entity[]; onDone: () => void }) {
+// The words a rule could look for in all these transactions: their shared payee, or
+// the words their descriptions start with.
+export function suggestPattern(rows: Transaction[]): string {
+  if (!rows.length) return '';
+  const payees = new Set(rows.map((r) => (r.payee || '').trim().toLowerCase()));
+  if (payees.size === 1 && rows[0].payee && rows[0].payee.trim().length >= 3) return rows[0].payee.trim();
+  const words = rows.map((r) => r.description.trim().split(/\s+/));
+  const shared: string[] = [];
+  for (let i = 0; i < words[0].length; i++) {
+    const w = words[0][i];
+    if (!words.every((list) => list[i]?.toLowerCase() === w.toLowerCase())) break;
+    // Reference numbers and dates differ from one payment to the next.
+    if (/\d{3,}/.test(w)) break;
+    shared.push(w);
+  }
+  const found = shared.join(' ');
+  return found.length >= 3 ? found : '';
+}
+const ruleText = (r: Transaction) => `${r.description} ${r.payee || ''} ${r.memo || ''}`.toLowerCase();
+
+export function BulkBar({ ids, rows = [], categories, entities = [], onDone }: { ids: number[]; rows?: Transaction[]; categories: string[]; entities?: Entity[]; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // Choices wait here until Apply, so several can be made for the same selection.
@@ -550,13 +570,34 @@ export function BulkBar({ ids, categories, entities = [], onDone }: { ids: numbe
   const [entity, setEntity] = useState('');
   const [status, setStatus] = useState('');
   const [kind, setKind] = useState('');
+  // Also a rule, so transactions like these, past and future, get the same choices.
+  const [makeRule, setMakeRule] = useState(false);
+  const [pattern, setPattern] = useState('');
+  const [oneAccount, setOneAccount] = useState(false);
+  const [saved, setSaved] = useState('');
+  const suggestion = suggestPattern(rows);
+  const accountIds = [...new Set(rows.map((r) => r.accountId))];
   const reset = () => {
     setCategory('');
     setEntity('');
     setStatus('');
     setKind('');
+    setMakeRule(false);
+    setPattern('');
+    setOneAccount(false);
   };
-  if (!ids.length) return null;
+  // After a rule is saved the selection clears; say so until it's dismissed.
+  if (!ids.length)
+    return saved ? (
+      <div role="status" className="flex items-center gap-3 border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100">
+        <span className="flex-1">{saved} Rules are listed on the Review page.</span>
+        <Button variant="ghost" className="min-h-8" onClick={() => setSaved('')}>
+          OK
+        </Button>
+      </div>
+    ) : null;
+  const rulePattern = (pattern || suggestion).trim();
+  const ruleMatches = rulePattern ? rows.filter((r) => ruleText(r).includes(rulePattern.toLowerCase()) && (!oneAccount || r.accountId === accountIds[0])).length : 0;
   const changes: TxChange = {
     ...(category ? { category } : {}),
     ...(entity ? { entity: Number(entity) } : {}),
@@ -568,7 +609,9 @@ export function BulkBar({ ids, categories, entities = [], onDone }: { ids: numbe
     setBusy(true);
     setError('');
     try {
-      await post('/api/bank/transactions/update', { ids, ...change });
+      const rule = makeRule && !change.flipSign && rulePattern.length >= 3 ? { pattern: rulePattern, accountId: oneAccount && accountIds.length === 1 ? accountIds[0] : null } : undefined;
+      await post('/api/bank/transactions/update', { ids, ...change, ...(rule ? { rule } : {}) });
+      setSaved(rule ? `Saved. Transactions containing "${rule.pattern}" now get these choices, past and future, unless you set one yourself.` : '');
       reset();
       onDone();
     } catch (e) {
@@ -611,9 +654,53 @@ export function BulkBar({ ids, categories, entities = [], onDone }: { ids: numbe
           <option value="ignored">Ignore</option>
         </select>
       </div>
+      {chosen > 0 && (
+        <div className="mt-2 rounded-md border border-emerald-200 bg-white/70 px-3 py-2 dark:border-emerald-900 dark:bg-slate-900/60">
+          <label className="flex items-center gap-2 font-medium">
+            <input
+              type="checkbox"
+              className="size-4 accent-emerald-600"
+              checked={makeRule}
+              disabled={busy}
+              onChange={(e) => {
+                setMakeRule(e.target.checked);
+                if (e.target.checked && !pattern) setPattern(suggestion);
+              }}
+            />
+            Also make a rule for transactions like these
+          </label>
+          {makeRule && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <label className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="shrink-0 text-slate-600 dark:text-slate-400">When the description or payee contains</span>
+                <input
+                  className={cx(SMALL_SELECT, 'min-w-32 flex-1')}
+                  value={pattern}
+                  maxLength={100}
+                  disabled={busy}
+                  onChange={(e) => setPattern(e.target.value)}
+                  placeholder="Such as ACME PROPERTY MGMT"
+                  aria-label="Words the rule looks for"
+                />
+              </label>
+              {accountIds.length === 1 && (
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" className="size-4 accent-emerald-600" checked={oneAccount} disabled={busy} onChange={(e) => setOneAccount(e.target.checked)} />
+                  Only in {rows[0].account}
+                </label>
+              )}
+              <span className={cx('basis-full text-xs', rulePattern.length >= 3 && ruleMatches < rows.length ? 'text-amber-700 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400')}>
+                {rulePattern.length < 3
+                  ? 'Type at least 3 characters.'
+                  : `Matches ${ruleMatches} of the ${rows.length} selected${rows.length < ids.length ? ' on this page' : ''}. It applies the same choices to every past and future transaction it matches, except ones you've set yourself.`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Button variant="primary" className="min-h-8" busy={busy} disabled={!chosen} onClick={() => apply(changes)}>
-          {chosen ? `Apply to ${ids.length === 1 ? '1 transaction' : `${ids.length} transactions`}` : 'Apply'}
+        <Button variant="primary" className="min-h-8" busy={busy} disabled={!chosen || (makeRule && rulePattern.length < 3)} onClick={() => apply(changes)}>
+          {chosen ? `Apply to ${ids.length === 1 ? '1 transaction' : `${ids.length} transactions`}${makeRule ? ' and save the rule' : ''}` : 'Apply'}
         </Button>
         {chosen > 0 && (
           <Button variant="ghost" className="min-h-8" disabled={busy} onClick={reset}>
@@ -633,6 +720,7 @@ export function BulkBar({ ids, categories, entities = [], onDone }: { ids: numbe
           Swap in/out
         </Button>
         {error && <span className="basis-full text-red-700 dark:text-red-400">{error}</span>}
+        {saved && !error && <span className="basis-full text-emerald-800 dark:text-emerald-300">{saved}</span>}
       </div>
     </div>
   );

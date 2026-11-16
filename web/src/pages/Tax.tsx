@@ -30,6 +30,7 @@ export function Tax({ meta, forms, onMetaChange }: { meta: Meta | null; forms: R
   const [conditions, setConditions] = useState<Condition[]>([{ field: 'zip', value: '', not: false }]);
   const [ruleStatus, setRuleStatus] = useState('business');
   const [newCategory, setNewCategory] = useState('');
+  const [newKind, setNewKind] = useState<'opex' | 'cogs' | 'income'>('opex');
 
   useEffect(() => {
     if (!year && meta?.years.length) setYear(meta.years.includes(lastYear) ? lastYear : meta.years[0]);
@@ -81,7 +82,7 @@ export function Tax({ meta, forms, onMetaChange }: { meta: Meta | null; forms: R
     const name = newCategory.trim();
     if (!name) return;
     act(async () => {
-      await post('/api/categories', { name, scheduleC: null, scheduleE: null });
+      await post('/api/categories', { name, scheduleC: null, scheduleE: null, expenseClass: newKind });
       setNewCategory('');
       onMetaChange();
     });
@@ -341,7 +342,7 @@ export function Tax({ meta, forms, onMetaChange }: { meta: Meta | null; forms: R
         </Card>
 
         <Card title={`Category to ${forms[form]?.name || ''} line`} padded={false}>
-          <p className="px-4 pt-3 text-xs text-slate-500">Suggestions only. Change them to match how your preparer files. "Cost of goods sold" is for things bought to resell or to make products from.</p>
+          <p className="px-4 pt-3 text-xs text-slate-500">Suggestions only. Change them to match how your preparer files. "Cost of goods sold" is for things bought to resell or to make products from. Money in under an Income category counts as revenue; under any other category it counts as a refund.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <tbody>
@@ -360,7 +361,7 @@ export function Tax({ meta, forms, onMetaChange }: { meta: Meta | null; forms: R
                     </td>
                     <td className={TD}>
                       <Select
-                        aria-label={`Kind of cost for ${category.name}`}
+                        aria-label={`Kind of category for ${category.name}`}
                         value={category.expenseClass || 'opex'}
                         onChange={(e) => act(async () => {
                           await post('/api/categories', { ...category, expenseClass: e.target.value });
@@ -369,6 +370,7 @@ export function Tax({ meta, forms, onMetaChange }: { meta: Meta | null; forms: R
                       >
                         <option value="opex">Operating expense</option>
                         <option value="cogs">Cost of goods sold</option>
+                        <option value="income">Income</option>
                       </Select>
                     </td>
                   </tr>
@@ -376,9 +378,16 @@ export function Tax({ meta, forms, onMetaChange }: { meta: Meta | null; forms: R
               </tbody>
             </table>
           </div>
-          <form onSubmit={addCategory} className="flex items-end gap-2 border-t border-slate-100 p-4 dark:border-slate-800">
-            <Field label="New category" className="flex-1">
+          <form onSubmit={addCategory} className="flex flex-wrap items-end gap-2 border-t border-slate-100 p-4 dark:border-slate-800">
+            <Field label="New category" className="min-w-40 flex-1">
               <Input value={newCategory} maxLength={60} onChange={(e) => setNewCategory(e.target.value)} />
+            </Field>
+            <Field label="Kind">
+              <Select value={newKind} onChange={(e) => setNewKind(e.target.value as typeof newKind)}>
+                <option value="opex">Expense</option>
+                <option value="cogs">Cost of goods sold</option>
+                <option value="income">Income</option>
+              </Select>
             </Field>
             <Button type="submit">Add</Button>
           </form>

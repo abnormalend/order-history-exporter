@@ -193,7 +193,7 @@ export function Review({ meta }: { meta: Meta | null }) {
         padded={false}
         className="mb-6"
       >
-        <BulkBar ids={selected} categories={categories} entities={entities} onDone={reload} />
+        <BulkBar ids={selected} rows={(data?.transactions || []).filter((t) => selected.includes(t.id))} categories={categories} entities={entities} onDone={reload} />
         {!data && list.loading && <Loading />}
         {data && !data.transactions.length && (
           <Empty>

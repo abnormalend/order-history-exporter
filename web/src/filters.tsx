@@ -16,7 +16,7 @@ export interface Meta {
   // Each ZIP's place name (its city, or a name you gave it).
   places: { zip: string; city: string | null; name: string | null; label: string; orders: number }[];
   years: string[];
-  categories: { name: string; scheduleC: string | null; scheduleE: string | null; form1065: string | null; form8825: string | null; expenseClass: 'opex' | 'cogs' }[];
+  categories: { name: string; scheduleC: string | null; scheduleE: string | null; form1065: string | null; form8825: string | null; expenseClass: 'opex' | 'cogs' | 'income' }[];
 }
 
 const KEYS = ['preset', 'from', 'to', 'years', 'store', 'category', 'zip', 'payment', 'q'] as const;

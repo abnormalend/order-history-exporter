@@ -195,7 +195,7 @@ export function Transactions({ meta }: { meta: Meta | null }) {
       )}
 
       <Card title={data ? plural(data.total, 'transaction') : 'Transactions'} padded={false}>
-        <BulkBar ids={selected} categories={categories} entities={entities} onDone={list.reload} />
+        <BulkBar ids={selected} rows={(data?.transactions || []).filter((t) => selected.includes(t.id))} categories={categories} entities={entities} onDone={list.reload} />
         {!data && list.loading && <Loading />}
         {data && !data.transactions.length && <Empty>No transactions match these filters.</Empty>}
         {data && data.transactions.length > 0 && (

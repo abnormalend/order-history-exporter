@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 27;
+const SCHEMA_VERSION = 28;
 
 const SCHEMA_V1 = `
   CREATE TABLE orders (
@@ -602,6 +602,12 @@ const SCHEMA_V26 = `
     ('University fees', 'education', strftime('%Y-%m-%dT%H:%M:%fZ'));
 `;
 
+// Categories can be income as well as expenses: money in under an income category is
+// revenue, while money in under an expense category is a refund of that spending.
+const SCHEMA_V28 = `
+  UPDATE categories SET expense_class = 'income' WHERE name IN ('Rental Income', 'Other Income');
+`;
+
 // Investment and retirement accounts: what kind each is (which decides how it's taxed
 // when spent) and whose it is in the household. Every balance is kept by day, for net
 // worth over time; balances already known start the history.
@@ -922,6 +928,7 @@ function migrate(db, file) {
     if (version < 25) db.exec(SCHEMA_V25);
     if (version < 26) db.exec(SCHEMA_V26);
     if (version < 27) db.exec(SCHEMA_V27);
+    if (version < 28) db.exec(SCHEMA_V28);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

@@ -102,8 +102,9 @@ export function reportRoutes(app: FastifyInstance, db: OrdersDb, rulesChanged: (
       // Left out, the partnership form lines stay as they were.
       form1065: body.form1065 === undefined ? undefined : lineParam('form-1065', body.form1065),
       form8825: body.form8825 === undefined ? undefined : lineParam('form-8825', body.form8825),
-      // Operating expense, or cost of goods sold (things bought to resell or make products from).
-      expenseClass: body.expenseClass === 'cogs' || body.expenseClass === 'opex' ? (body.expenseClass as 'opex' | 'cogs') : null,
+      // Operating expense, cost of goods sold (things bought to resell or make products
+      // from), or income.
+      expenseClass: body.expenseClass === 'cogs' || body.expenseClass === 'opex' || body.expenseClass === 'income' ? (body.expenseClass as 'opex' | 'cogs' | 'income') : null,
     };
     db.saveCategory(category);
     audit(request, 'category.save', category);

@@ -13,7 +13,9 @@ type Row = Record<string, any>;
 
 // Money back that isn't income: any positive amount with a spending category, or
 // filed as a refund. (Uncategorised money in still counts as income.)
-const REFUND_SQL = `(t.amount > 0 AND t.kind = 'normal' AND t.category IS NOT NULL AND t.category NOT IN (${INCOME_CATEGORIES.map((c) => `'${c}'`).join(', ')}))`;
+// Money in under an expense category is a refund of that spending; under an income
+// category (Rental Income, Other Income, or one the user made) it's revenue.
+const REFUND_SQL = `(t.amount > 0 AND t.kind = 'normal' AND t.category IS NOT NULL AND t.category NOT IN (SELECT name FROM categories WHERE expense_class = 'income'))`;
 const MATCH_DAYS = 2; // the same payment's date can differ between sources
 const TRANSFER_DAYS = 5; // money can take a few days to arrive
 const DAY_MS = 86400000;
@@ -360,6 +362,7 @@ export function createBankStore(db: DatabaseSync) {
     const chargesAt = db.prepare(
       `SELECT category, COUNT(*) AS n FROM bank_transactions WHERE account_id = ? AND payee = ? AND amount < 0 AND kind = 'normal' GROUP BY category ORDER BY category IS NULL, n DESC`
     );
+    const incomeCategories = new Set([...INCOME_CATEGORIES, ...(db.prepare("SELECT name FROM categories WHERE expense_class = 'income'").all() as Row[]).map((r) => String(r.name))]);
     const refundCategory = (row: Row): string | null => {
       if ((row.amount as number) <= 0 || !row.payee) return null;
       // Deposits, payouts and transfers aren't refunds, whoever they're from.
@@ -367,7 +370,7 @@ export function createBankStore(db: DatabaseSync) {
       if (MONEY_IN.test(text) || TRANSFER_WORDS.test(text)) return null;
       const found = chargesAt.all(row.account_id, row.payee) as Row[];
       if (!found.length) return null;
-      return (found[0].category as string | null) && !INCOME_CATEGORIES.includes(found[0].category as string) ? (found[0].category as string) : REFUNDS;
+      return (found[0].category as string | null) && !incomeCategories.has(found[0].category as string) ? (found[0].category as string) : REFUNDS;
     };
     for (const row of rows) {
       const text = `${row.description} ${row.payee || ''} ${row.memo || ''}`.toLowerCase();
