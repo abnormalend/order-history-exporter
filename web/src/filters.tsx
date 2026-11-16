@@ -165,7 +165,7 @@ export function FilterBar({ meta, show = KEYS as unknown as string[] }: { meta: 
         <MultiSelect label="Store" allLabel="All stores" options={(meta?.stores || []).map((st) => [st.store, st.name])} selected={values('store')} onChange={(next) => set({ store: next })} />
       )}
       {has('category') && (
-        <MultiSelect label="Category" allLabel="All categories" options={(meta?.categories || []).map((c) => [c.name, c.name])} selected={values('category')} onChange={(next) => set({ category: next })} />
+        <MultiSelect label="Category" allLabel="All categories" options={[...(meta?.categories || []).map((c): [string, string] => [c.name, c.name]), ['Uncategorized', 'Uncategorized']]} selected={values('category')} onChange={(next) => set({ category: next })} />
       )}
       {has('zip') && (
         <MultiSelect

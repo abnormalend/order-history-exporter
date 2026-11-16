@@ -121,3 +121,13 @@ test('a bulk change can also save a rule, which sorts past and future transactio
   // A pattern needs at least 3 characters.
   await assert.rejects(post('/api/bank/transactions/update', { ids: [after[0].id], category: 'Rental Income', rule: { pattern: 'AC' } }), { status: 400 });
 });
+
+test('items with no category can be picked on their own', () => {
+  db.saveOrders('ebay', [{ orderId: 'UNCAT-1', date: '2026-01-05', total: 30, detailRead: true, items: [{ name: 'Zqxv mystery part', price: 10 }, { name: 'Printer paper ream', price: 20 }] }]);
+  const all = db.listItems({}, { limit: 100 }).items.filter((i) => i.orderId === 'UNCAT-1');
+  assert.equal(all.length, 2);
+  const picked = db.listItems({ category: ['Uncategorized'] }, { limit: 100 }).items;
+  assert.ok(picked.length >= 1);
+  assert.ok(picked.every((i) => i.category === 'Uncategorized'));
+  assert.ok(picked.some((i) => i.name === 'Zqxv mystery part'));
+});
