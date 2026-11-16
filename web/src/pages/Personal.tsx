@@ -677,12 +677,26 @@ function GroupDetail({ group, future, member, onClose }: { group: GroupRow; futu
         <>
           {group.merchants.length > 0 && (
             <div className="mb-3 flex flex-wrap gap-1.5">
-              {group.merchants.map((m) => (
-                <span key={m.name} className="rounded-full bg-white px-2.5 py-1 text-xs shadow-sm dark:bg-slate-900">
-                  <span className="font-medium">{m.name}</span> <span className="text-slate-500 tabular-nums">{wholeMoney(m.amount)}</span>
-                  {m.count > 1 && <span className="text-slate-400"> ×{m.count}</span>}
-                </span>
-              ))}
+              {group.merchants.map((m) => {
+                const chip = (
+                  <>
+                    <span className="font-medium">{m.name}</span> <span className="text-slate-500 tabular-nums">{wholeMoney(m.amount)}</span>
+                    {m.count > 1 && <span className="text-slate-400"> ×{m.count}</span>}
+                  </>
+                );
+                const chipClass = 'rounded-full bg-white px-2.5 py-1 text-xs shadow-sm dark:bg-slate-900';
+                // For the owner, a payee opens its payments here in Transactions, to give them a category.
+                const ids = group.transactions.filter((t) => t.name.toLowerCase() === m.name.toLowerCase()).map((t) => t.id).slice(0, 100);
+                return member || !ids.length ? (
+                  <span key={m.name} className={chipClass}>
+                    {chip}
+                  </span>
+                ) : (
+                  <Link key={m.name} to={`/transactions?preset=all&kind=all&${ids.map((id) => `id=${id}`).join('&')}`} className={cx(chipClass, 'hover:ring-1 hover:ring-slate-300')}>
+                    {chip}
+                  </Link>
+                );
+              })}
             </div>
           )}
           <ul className="max-h-72 divide-y divide-slate-200/70 overflow-y-auto text-sm dark:divide-slate-700/70">

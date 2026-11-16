@@ -25,7 +25,9 @@ export function useBankQuery() {
     if (to) out.set('to', to);
     for (const y of years || []) out.append('years', y);
     for (const key of ['account', 'category', 'entity', 'id']) for (const v of filters.values(key)) out.append(key, v);
-    if (business && !filters.values('entity').length) out.append('entity', String(business));
+    // The business picked in the menu narrows the list, except for payments opened from a
+    // link or asked for as personal: those belong to no business, so it would hide them all.
+    if (business && !filters.values('entity').length && !filters.values('id').length && filters.value('status') !== 'personal') out.append('entity', String(business));
     for (const key of ['status', 'kind', 'direction', 'source', 'q', 'import', 'outcome', 'unmatched', 'asset']) if (filters.value(key)) out.set(key, filters.value(key));
     for (const [key, v] of Object.entries(extra)) out.set(key, String(v));
     return out.toString();
