@@ -95,6 +95,9 @@ const BY_CATEGORY: Record<string, Group> = {
   'Owner Withdrawal': 'business',
 };
 
+// A category of the owner's own named for earnings is pay, whatever kind it was made as.
+const PAY_NAME = /\b(salary|salaries|wages?|w-?2|payroll|paychecks?|pay)\b/i;
+
 const flowOf = (group: Group): Flow =>
   (SPENDING_GROUPS as readonly string[]).includes(group) ? 'out' : (INCOME_GROUPS as readonly string[]).includes(group) ? 'in' : 'move';
 
@@ -112,11 +115,22 @@ export function businessPattern(last4s: string[]): RegExp | null {
   return digits.length ? new RegExp(`\\b(chk|checking|acct|account|sav|savings)\\s*\\.{0,3}\\s*(${digits.join('|')})\\b`, 'i') : null;
 }
 
-export function classify(tx: { amount: number; description: string; payee?: string | null; category?: string | null }, business: RegExp | null = null): Classified {
+// income: the names of categories made as income (built-in ones are known already).
+export function classify(
+  tx: { amount: number; description: string; payee?: string | null; category?: string | null },
+  business: RegExp | null = null,
+  income: ReadonlySet<string> = new Set()
+): Classified {
   const text = `${tx.description} ${tx.payee ?? ''}`;
   if (business?.test(text)) return { flow: 'move', group: 'business', guessed: true };
   for (const [pattern, group] of MOVES) if (pattern.test(text)) return { flow: 'move', group: typeof group === 'function' ? group(tx.amount) : group, guessed: true };
   const category = tx.category && tx.category !== 'Uncategorized' ? tx.category : null;
+  // Money in under a category of the owner's own for earnings: what kind, by its name or the description.
+  if (tx.amount > 0 && category && !BY_CATEGORY[category] && (income.has(category) || PAY_NAME.test(category))) {
+    if (PAY_NAME.test(category)) return { flow: 'in', group: 'pay', guessed: false };
+    for (const [pattern, group] of INCOME) if (pattern.test(text)) return { flow: 'in', group, guessed: false };
+    return { flow: 'in', group: 'other_in', guessed: false };
+  }
   if (category === 'Refunds & Returns' || (tx.amount > 0 && category && flowOf(BY_CATEGORY[category] ?? 'other') === 'out')) {
     // Money back on a purchase: less spending in the group it came from.
     const back = category === 'Refunds & Returns' ? spendingGroup(text) : (BY_CATEGORY[category] as SpendingGroup);

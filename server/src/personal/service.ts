@@ -85,6 +85,7 @@ export function personalService({ db, today = () => new Date().toISOString().sli
     const business = businessPattern(
       (db.prepare("SELECT last4 FROM bank_accounts WHERE last4 IS NOT NULL AND (owner != 'personal' OR entity_id IS NOT NULL)").all() as Row[]).map((r) => String(r.last4))
     );
+    const income = new Set((db.prepare("SELECT name FROM categories WHERE expense_class = 'income'").all() as Row[]).map((r) => String(r.name)));
     const rows = db
       .prepare(
         // Transfers count only between two people's accounts: money one family member
@@ -117,7 +118,7 @@ export function personalService({ db, today = () => new Date().toISOString().sli
         ? r.amount < 0
           ? { flow: 'out' as const, group: ((SPENDING_GROUPS as readonly string[]).includes(r.label_group) ? r.label_group : 'family') as Group, guessed: false }
           : { flow: 'in' as const, group: 'family_in' as Group, guessed: false }
-        : classify({ amount: r.amount, description: r.description, payee: r.payee, category: r.category }, business);
+        : classify({ amount: r.amount, description: r.description, payee: r.payee, category: r.category }, business, income);
       return {
         id: r.id,
         posted: r.posted,

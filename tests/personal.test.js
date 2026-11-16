@@ -89,6 +89,15 @@ test('payments are sorted into money in, money out and money moved', () => {
   // The owner's category wins over the description, and money back on a purchase is less spending.
   assert.deepEqual(classify({ amount: -60, description: 'XYZQ THING', category: 'Grocery' }), { flow: 'out', group: 'food', guessed: false });
   assert.deepEqual(classify({ amount: 25, description: 'STORE CREDIT', category: 'Clothing' }), { flow: 'out', group: 'shopping', guessed: false });
+  // A category of the owner's own for pay is income, even one made as an expense; an
+  // income category of their own is sorted by the description; another is still a refund.
+  for (const category of ['w2 salary', 'Wages', 'W-2 Pay', 'Paychecks']) {
+    assert.deepEqual(classify({ amount: 3000, description: 'EXAMPLE CORP DES:PAYROLL', category }), { flow: 'in', group: 'pay', guessed: false }, category);
+  }
+  assert.deepEqual(classify({ amount: 400, description: 'Zelle payment from Pat Example', category: 'Tutoring' }, null, new Set(['Tutoring'])), { flow: 'in', group: 'people_in', guessed: false });
+  assert.deepEqual(classify({ amount: 400, description: 'XYZQ', category: 'Tutoring' }, null, new Set(['Tutoring'])), { flow: 'in', group: 'other_in', guessed: false });
+  assert.equal(classify({ amount: 30, description: 'XYZQ', category: 'Kids Sports' }).flow, 'out', 'money back under a spending category of their own');
+  assert.equal(classify({ amount: -30, description: 'PAYPAL *SHOP', category: 'w2 salary' }).flow, 'out');
   // A transfer to one of the owner's business accounts is money moved, by its last four.
   const business = businessPattern(['1234']);
   assert.deepEqual(classify({ amount: -500, description: 'Online transfer to CHK ...1234' }, business), { flow: 'move', group: 'business', guessed: true });
