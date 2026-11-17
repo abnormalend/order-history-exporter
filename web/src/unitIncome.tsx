@@ -1,6 +1,6 @@
-// Income per unit, month by month: one small chart for each unit, all on the same
-// scale so they can be compared, each in its unit's own colour.
-import { useState } from 'react';
+// Income per unit, month by month: one chart with each month's units side by side, each
+// in its unit's own colour, so what each earns can be compared at a glance.
+import { useEffect, useRef, useState } from 'react';
 import { useApi } from './api';
 import { businessQuery, useBusiness } from './business';
 import { money, monthLabel, wholeMoney } from './format';
@@ -40,7 +40,7 @@ export function unitColours(names: string[]) {
 
 const niceTop = (max: number) => {
   if (max <= 0) return { top: 1000, step: 250 };
-  const raw = max / 3;
+  const raw = max / 4;
   const mag = 10 ** Math.floor(Math.log10(raw));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw)!;
   return { top: Math.ceil(max / step) * step, step };
@@ -49,99 +49,124 @@ const niceTop = (max: number) => {
 export function UnitIncomeCard() {
   const { business } = useBusiness();
   const data = useApi<{ months: string[]; units: Unit[] }>(`/api/pl/units?x=1${businessQuery(business)}`);
-  const [own, setOwn] = useState(false);
-  if (!data.data?.units.length) return null;
-  const units = data.data.units;
-  const colours = unitColours(units.map((u) => u.name));
-  const shared = niceTop(Math.max(...units.flatMap((u) => u.months.map((m) => m.total))));
-  const mixed = units.some((u) => u.months.some((m) => m.rent) && u.months.some((m) => m.stays));
-  const toggle = (value: boolean, label: string) => (
-    <button
-      type="button"
-      onClick={() => setOwn(value)}
-      aria-pressed={own === value}
-      className={`rounded px-2 py-1 ${own === value ? 'bg-white font-medium shadow-sm dark:bg-slate-700' : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <Card
-      title="Income per unit by month"
-      className="mt-5"
-      actions={
-        <div className="flex rounded-md bg-slate-100 p-0.5 text-xs dark:bg-slate-800">
-          {toggle(false, 'Same scale')}
-          {toggle(true, 'Own scale')}
-        </div>
-      }
-    >
-      <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2 xl:grid-cols-3">
-        {units.map((u, i) => {
-          const { top, step } = own ? niceTop(Math.max(...u.months.map((m) => m.total))) : shared;
-          return <UnitChart key={u.key} unit={u} colour={colours[i]} top={top} step={step} />;
-        })}
-      </div>
-      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-        Each stay&apos;s payout is spread over the nights it covers; mid-term rent counts in the month it was received{mixed ? ' (shown lighter where a unit has both)' : ''}.{' '}
-        {own ? 'Each chart on its own scale, to show its ups and downs.' : 'All on the same scale, to compare units.'} The total and average are for the last 12 whole months.
-      </p>
-    </Card>
-  );
-}
-
-function UnitChart({ unit, colour, top, step }: { unit: Unit; colour: string; top: number; step: number }) {
+  const holder = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(640);
   const [active, setActive] = useState<number | null>(null);
-  const W = 320;
-  const H = 150;
-  const pad = { left: 44, right: 4, top: 8, bottom: 20 };
-  const plot = H - pad.top - pad.bottom;
+  const units = data.data?.units ?? [];
+  useEffect(() => {
+    const element = holder.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(300, Math.floor(entry.contentRect.width))));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [units.length > 0]);
+  if (!units.length) return null;
+
+  const colours = unitColours(units.map((u) => u.name));
+  const months = units[0].months.map((m) => m.month);
+  const { top, step } = niceTop(Math.max(...units.flatMap((u) => u.months.map((m) => m.total))));
+  // Rent is drawn lighter on top of stays only for a unit that has both.
+  const both = units.map((u) => u.months.some((m) => m.stays) && u.months.some((m) => m.rent));
+  const height = 300;
+  const pad = { left: 62, right: 8, top: 12, bottom: 28 };
+  const plot = height - pad.top - pad.bottom;
   const y = (v: number) => pad.top + plot * (1 - Math.max(0, v) / top);
-  const slot = (W - pad.left - pad.right) / unit.months.length;
-  const bar = Math.min(18, slot * 0.68);
+  const slot = (width - pad.left - pad.right) / months.length;
+  const group = slot * 0.82;
+  const bar = group / units.length;
   const ticks: number[] = [];
   for (let v = 0; v <= top + step / 2; v += step) ticks.push(v);
-  const shown = active === null ? null : unit.months[active];
-  const both = unit.months.some((m) => m.stays) && unit.months.some((m) => m.rent);
+  const labelEvery = Math.ceil(58 / slot);
+  const shown = active === null ? null : active;
+
   return (
-    <div className="min-w-0">
-      <div className="mb-1 flex items-baseline justify-between gap-2">
-        <h3 className="flex items-center gap-2 text-sm font-semibold">
-          <span className="size-2.5 rounded-sm" style={{ background: colour }} aria-hidden />
-          {unit.name}
-        </h3>
-        <span className="text-xs text-slate-500 tabular-nums dark:text-slate-400">
-          {shown
-            ? `${monthLabel(shown.month, true)}: ${money(shown.total)}${shown.rent && shown.stays ? ` (${wholeMoney(shown.stays)} stays, ${wholeMoney(shown.rent)} rent)` : ''}`
-            : `${wholeMoney(unit.total)} a year · ${wholeMoney(unit.average)}/mo`}
-        </span>
-      </div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="block h-auto w-full" role="img" aria-label={`${unit.name}: income by month`}>
-        {ticks.map((v) => (
-          <g key={v}>
-            <line x1={pad.left} x2={W - pad.right} y1={y(v)} y2={y(v)} className={v === 0 ? 'stroke-slate-400 dark:stroke-slate-600' : 'stroke-slate-200 dark:stroke-slate-800'} />
-            <text x={pad.left - 6} y={y(v) + 3.5} textAnchor="end" className="fill-slate-500 text-[10px] tabular-nums dark:fill-slate-400">
-              {v >= 1000 ? `$${Math.round(v / 100) / 10}K` : `$${v}`}
-            </text>
-          </g>
+    <Card title="Income per unit by month" className="mt-5">
+      <div className="mb-3 flex flex-wrap gap-x-6 gap-y-2">
+        {units.map((u, i) => (
+          <div key={u.key} className="min-w-0">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <span className="size-2.5 rounded-sm" style={{ background: colours[i] }} aria-hidden />
+              {u.name}
+            </div>
+            <div className="text-xs text-slate-500 tabular-nums dark:text-slate-400">
+              {wholeMoney(u.total)} a year · {wholeMoney(u.average)}/mo
+            </div>
+          </div>
         ))}
-        {unit.months.map((m, i) => {
-          const x = pad.left + slot * i + (slot - bar) / 2;
-          return (
-            <g key={m.month} onMouseEnter={() => setActive(i)} onMouseLeave={() => setActive(null)} opacity={active === null || active === i ? 1 : 0.55}>
-              <title>{`${monthLabel(m.month)}: ${money(m.total)}`}</title>
-              <rect x={pad.left + slot * i} y={pad.top} width={slot} height={plot} fill="transparent" />
-              {m.stays > 0 && <rect x={x} y={y(m.stays)} width={bar} height={y(0) - y(m.stays)} fill={colour} />}
-              {m.rent > 0 && <rect x={x} y={y(m.stays + m.rent)} width={bar} height={y(m.stays) - y(m.stays + m.rent)} fill={colour} fillOpacity={both ? 0.45 : 1} />}
-              {(i % 3 === 0 || i === unit.months.length - 1) && (
-                <text x={pad.left + slot * i + slot / 2} y={H - 6} textAnchor="middle" className="fill-slate-500 text-[10px] dark:fill-slate-400">
-                  {monthLabel(m.month, true)}
-                </text>
-              )}
+      </div>
+      <div ref={holder} className="relative min-w-0">
+        <svg width={width} height={height} role="img" aria-label="Income per unit by month" className="block">
+          {ticks.map((v) => (
+            <g key={v}>
+              <line x1={pad.left} x2={width - pad.right} y1={y(v)} y2={y(v)} className={v === 0 ? 'stroke-slate-400 dark:stroke-slate-600' : 'stroke-slate-200 dark:stroke-slate-800'} />
+              <text x={pad.left - 8} y={y(v) + 4} textAnchor="end" className="fill-slate-500 text-[11px] tabular-nums dark:fill-slate-400">
+                {wholeMoney(v)}
+              </text>
             </g>
-          );
-        })}
-      </svg>
-    </div>
+          ))}
+          {months.map((month, mi) => {
+            const left = pad.left + slot * mi + (slot - group) / 2;
+            return (
+              <g
+                key={month}
+                tabIndex={0}
+                aria-label={`${monthLabel(month)}: ${units.map((u) => `${u.name} ${money(u.months[mi].total)}`).join(', ')}`}
+                className="outline-none"
+                onMouseEnter={() => setActive(mi)}
+                onMouseLeave={() => setActive(null)}
+                onFocus={() => setActive(mi)}
+                onBlur={() => setActive(null)}
+                opacity={active === null || active === mi ? 1 : 0.5}
+              >
+                <rect x={pad.left + slot * mi} y={pad.top} width={slot} height={plot} fill="transparent" />
+                {units.map((u, ui) => {
+                  const m = u.months[mi];
+                  const x = left + bar * ui;
+                  const w = Math.max(1, bar - (bar > 4 ? 1 : 0));
+                  return (
+                    <g key={u.key}>
+                      {m.stays > 0 && <rect x={x} y={y(m.stays)} width={w} height={y(0) - y(m.stays)} fill={colours[ui]} />}
+                      {m.rent > 0 && <rect x={x} y={y(m.stays + m.rent)} width={w} height={y(m.stays) - y(m.stays + m.rent)} fill={colours[ui]} fillOpacity={both[ui] ? 0.45 : 1} />}
+                    </g>
+                  );
+                })}
+                {mi % labelEvery === 0 && (
+                  <text x={pad.left + slot * mi + slot / 2} y={height - 8} textAnchor="middle" className="fill-slate-500 text-[11px] dark:fill-slate-400">
+                    {monthLabel(month, true)}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+        {shown !== null && (
+          <div
+            className="pointer-events-none absolute top-2 z-10 w-56 rounded-md border border-slate-200 bg-white p-3 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900"
+            style={{ left: Math.min(Math.max(pad.left + slot * shown + slot / 2 - 112, 0), width - 224) }}
+          >
+            <div className="mb-1 font-semibold">{monthLabel(months[shown])}</div>
+            {units
+              .map((u, i) => ({ u, i, m: u.months[shown] }))
+              .sort((a, b) => b.m.total - a.m.total)
+              .map(({ u, i, m }) => (
+                <div key={u.key} className="flex justify-between gap-2">
+                  <span className="flex items-center gap-1.5">
+                    <span className="size-2 rounded-sm" style={{ background: colours[i] }} aria-hidden /> {u.name}
+                  </span>
+                  <span className="tabular-nums">{money(m.total)}</span>
+                </div>
+              ))}
+            <div className="mt-1 flex justify-between gap-2 border-t border-slate-100 pt-1 font-medium dark:border-slate-800">
+              <span>All units</span>
+              <span className="tabular-nums">{money(units.reduce((t, u) => t + u.months[shown].total, 0))}</span>
+            </div>
+          </div>
+        )}
+      </div>
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Each stay&apos;s payout is spread over the nights it covers; mid-term rent counts in the month it was received{both.some(Boolean) ? ' (shown lighter where a unit has both)' : ''}. The yearly total
+        and monthly average are for the last 12 whole months.
+      </p>
+    </Card>
   );
 }
