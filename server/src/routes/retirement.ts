@@ -28,7 +28,13 @@ const planSchema = z.object({
   spouse: person.nullable(),
   spending: dollars,
   spendingChangeAt80: z.number().min(-0.9).max(1),
-  markets: z.object({ stocks: rate, bonds: rate, cash: rate, inflation: z.number().min(-0.05).max(0.2) }),
+  markets: z.object({
+    stocks: rate,
+    bonds: rate,
+    cash: rate,
+    inflation: z.number().min(-0.05).max(0.2),
+    volatility: z.object({ stocks: z.number().min(0).max(0.6), bonds: z.number().min(0).max(0.4) }).optional(),
+  }),
   streams: z
     .array(
       z.object({
@@ -77,6 +83,27 @@ function parse(body: unknown): Plan {
 export function retirementRoutes(app: FastifyInstance, retirement: RetirementService) {
   app.get('/api/retirement', async () => retirement.get());
   app.post('/api/retirement/preview', async (request) => retirement.preview(parse(request.body)));
+  app.post('/api/retirement/simulate', async (request) => {
+    const body = (request.body ?? {}) as { plan?: unknown; trials?: unknown };
+    const trials = body.trials === undefined ? undefined : Number(body.trials);
+    if (trials !== undefined && !(Number.isInteger(trials) && trials >= 100 && trials <= 5000)) throw new HttpError(400, 'Trials: 100 to 5,000.');
+    return retirement.trials(parse(body.plan), { trials });
+  });
+  app.post('/api/retirement/compare', async (request) => retirement.compare(parse(request.body)));
+  app.post('/api/retirement/scenarios', async (request) => {
+    const body = (request.body ?? {}) as { name?: unknown; plan?: unknown };
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name || name.length > 60) throw new HttpError(400, 'Give the scenario a name (up to 60 characters).');
+    const scenarios = retirement.saveScenario(name, parse(body.plan));
+    (request as AuthedRequest).audit('retirement.scenario', { name });
+    return { scenarios };
+  });
+  app.post('/api/retirement/scenarios/:id/delete', async (request) => {
+    const id = Number((request.params as { id: string }).id);
+    const scenarios = retirement.removeScenario(id);
+    (request as AuthedRequest).audit('retirement.scenario.delete', { id });
+    return { scenarios };
+  });
   app.post('/api/retirement/plan', async (request) => {
     const plan = parse(request.body);
     const projection = retirement.save(plan);

@@ -40,6 +40,7 @@ interface Markets {
   bonds: number;
   cash: number;
   inflation: number;
+  volatility?: { stocks: number; bonds: number };
 }
 interface Plan {
   me: Person;
@@ -109,8 +110,38 @@ interface Data {
   defaults: { markets: Markets; taxes: TaxPlan };
   states: StateOption[];
   taxYear: number;
+  volatility: { stocks: number; bonds: number; cash: number };
+  trials: number;
+  scenarios: Scenario[];
   projection: Projection | null;
   startYear: number;
+}
+interface Scenario {
+  id: number;
+  name: string;
+  plan: Plan;
+  savedAt: string;
+}
+interface Simulation {
+  trials: number;
+  successRate: number;
+  years: { year: number; ages: [number | null, number | null]; p10: number; p25: number; p50: number; p75: number; p90: number }[];
+  end: { p10: number; p50: number; p90: number };
+  shortfall: { medianYear: number; earlyYear: number } | null;
+  lifetimeTax: { p50: number };
+}
+interface Compared {
+  id: number | null;
+  name: string;
+  retireYear: number;
+  spending: number;
+  successRate: number;
+  runsOut: { year: number } | null;
+  atRetirement: { year: number; total: number } | null;
+  atEnd: number;
+  endP10: number;
+  endP50: number;
+  lifetimeTax: number;
 }
 
 const BUCKETS: { key: Bucket; label: string; colour: string }[] = [
@@ -124,7 +155,7 @@ const BUCKETS: { key: Bucket; label: string; colour: string }[] = [
 ];
 const newPerson = (name: string, birthYear: number): Person => ({ name, birthYear, retireAge: 65, planToAge: 95, takeHome: 0, contributions: { pre_tax: 0, roth: 0, hsa: 0, deferred: 0 }, ssAtFullAge: 0, ssClaimAge: 67 });
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
-const short = (n: number) => (Math.abs(n) >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : `$${Math.round(n / 1e3)}K`);
+const short = (n: number) => (Math.abs(n) < 500 ? '$0' : Math.abs(n) >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : `$${Math.round(n / 1e3)}K`);
 const ageText = (ages: [number | null, number | null]) => ages.filter((a) => a !== null).join(' / ');
 
 // A number field that keeps what's typed until it's a number. Percent fields show 7 for 0.07.
@@ -178,6 +209,11 @@ function Planner({ data }: { data: Data }) {
   const taxes = { ...data.defaults.taxes, ...plan.taxes };
   const setTaxes = (change: Partial<TaxPlan>) => setPlan((p) => ({ ...p, taxes: { ...data.defaults.taxes, ...p.taxes, ...change } }));
   const [projection, setProjection] = useState<Projection | null>(data.projection);
+  const [sim, setSim] = useState<Simulation | null>(null);
+  const [scenarios, setScenarios] = useState<Scenario[]>(data.scenarios);
+  const [compared, setCompared] = useState<Compared[] | null>(null);
+  const [scenarioName, setScenarioName] = useState('');
+  const [scenarioBusy, setScenarioBusy] = useState(false);
   const [problem, setProblem] = useState('');
   const [saving, setSaving] = useState(false);
   const [savedPlan, setSavedPlan] = useState(JSON.stringify(data.plan));
@@ -189,12 +225,50 @@ function Planner({ data }: { data: Data }) {
       try {
         setProjection(await post<Projection>('/api/retirement/preview', plan));
         setProblem('');
+        setSim(await post<Simulation>('/api/retirement/simulate', { plan }));
       } catch (e) {
         setProblem((e as Error).message);
       }
     }, 350);
     return () => clearTimeout(timer);
   }, [plan]);
+
+  useEffect(() => {
+    if (!scenarios.length) {
+      setCompared(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setCompared(await post<Compared[]>('/api/retirement/compare', plan));
+      } catch {
+        // The plan's own problem is shown already.
+      }
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [plan, scenarios]);
+
+  async function saveScenario() {
+    setScenarioBusy(true);
+    try {
+      const result = await post<{ scenarios: Scenario[] }>('/api/retirement/scenarios', { name: scenarioName.trim(), plan });
+      setScenarios(result.scenarios);
+      setScenarioName('');
+      setProblem('');
+    } catch (e) {
+      setProblem((e as Error).message);
+    } finally {
+      setScenarioBusy(false);
+    }
+  }
+
+  async function removeScenario(id: number) {
+    try {
+      setScenarios((await post<{ scenarios: Scenario[] }>(`/api/retirement/scenarios/${id}/delete`)).scenarios);
+    } catch (e) {
+      setProblem((e as Error).message);
+    }
+  }
 
   async function save() {
     setSaving(true);
@@ -225,7 +299,7 @@ function Planner({ data }: { data: Data }) {
         }
       />
       {problem && <Banner>{problem}</Banner>}
-      {projection && <Results projection={projection} plan={plan} />}
+      {projection && <Results projection={projection} plan={plan} sim={sim} />}
 
       <div className="mb-5 grid gap-5 lg:grid-cols-2">
         <Card title="Starting point">
@@ -259,6 +333,15 @@ function Planner({ data }: { data: Data }) {
             {(['stocks', 'bonds', 'cash', 'inflation'] as const).map((k) => (
               <Field key={k} label={k === 'inflation' ? 'Inflation, % a year' : `${k[0].toUpperCase()}${k.slice(1)} return, % a year`} hint={k === 'inflation' ? undefined : 'Before inflation'}>
                 <Num percent value={plan.markets[k]} onChange={(n) => setPlan({ ...plan, markets: { ...plan.markets, [k]: n } })} />
+              </Field>
+            ))}
+            {(['stocks', 'bonds'] as const).map((k) => (
+              <Field key={`vol-${k}`} label={`${k === 'stocks' ? 'Stocks' : 'Bonds'} swing, % a year`} hint="For the market trials (one standard deviation)">
+                <Num
+                  percent
+                  value={plan.markets.volatility?.[k] ?? data.volatility[k]}
+                  onChange={(n) => setPlan({ ...plan, markets: { ...plan.markets, volatility: { stocks: data.volatility.stocks, bonds: data.volatility.bonds, ...plan.markets.volatility, [k]: n } } })}
+                />
               </Field>
             ))}
           </div>
@@ -463,6 +546,77 @@ function Planner({ data }: { data: Data }) {
         </Card>
       </div>
 
+      <Card
+        title="Scenarios"
+        className="mb-5"
+        padded={false}
+        actions={
+          <form
+            className="flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (scenarioName.trim()) saveScenario();
+            }}
+          >
+            <Input aria-label="Scenario name" placeholder="Name, e.g. Retire at 60" value={scenarioName} maxLength={60} onChange={(e) => setScenarioName(e.target.value)} className="w-48" />
+            <Button type="submit" busy={scenarioBusy} disabled={!scenarioName.trim()}>
+              Save as scenario
+            </Button>
+          </form>
+        }
+      >
+        {!scenarios.length ? (
+          <p className="p-4 text-sm text-slate-500">Save this plan under a name, change something (retire later, spend less, move state), and see them side by side. Saving under the same name replaces it.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[48rem] text-sm">
+              <thead className="text-xs text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">Scenario</th>
+                  <th className="px-3 py-2 text-right font-medium">Retire</th>
+                  <th className="px-3 py-2 text-right font-medium">Spending</th>
+                  <th className="px-3 py-2 text-right font-medium">Chance it lasts</th>
+                  <th className="px-3 py-2 text-right font-medium">At the end, steady</th>
+                  <th className="px-3 py-2 text-right font-medium">At the end, bad markets</th>
+                  <th className="px-3 py-2 text-right font-medium">Lifetime tax</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {(compared ?? [{ id: null, name: 'This plan' } as Compared, ...scenarios.map((x) => ({ id: x.id, name: x.name }) as Compared)]).map((c) => {
+                  const scenario = scenarios.find((x) => x.id === c.id);
+                  const ready = c.successRate !== undefined;
+                  return (
+                    <tr key={c.id ?? 'current'} className={cx(c.id === null && 'bg-emerald-50/60 dark:bg-emerald-950/30')}>
+                      <td className="px-3 py-2 font-medium">{c.name}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ready ? c.retireYear : '…'}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ready ? wholeMoney(c.spending) : ''}</td>
+                      <td className={cx('px-3 py-2 text-right font-medium tabular-nums', ready && chanceTone(c.successRate))}>{ready ? chance(c.successRate) : ''}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ready ? short(c.atEnd) : ''}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ready ? (c.endP10 > 0.5 ? short(c.endP10) : 'Runs out') : ''}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ready ? short(c.lifetimeTax) : ''}</td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        {scenario && (
+                          <>
+                            <Button className="mr-1" onClick={() => setPlan({ ...scenario.plan, taxes: { ...data.defaults.taxes, ...scenario.plan.taxes } })}>
+                              Load
+                            </Button>
+                            <IconRemove label={`Remove ${scenario.name}`} onClick={() => removeScenario(scenario.id)} />
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="px-3 pb-3 text-xs text-slate-500">
+              "Bad markets" is the 1-in-10 worst trial. Loading a scenario puts it on screen to change; save the plan to keep it as yours.
+            </p>
+          </div>
+        )}
+      </Card>
+
       {projection && <YearByYear projection={projection} />}
       <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
         A planning tool, not tax or investment advice. Growth is on each year's opening balance, and RMDs use that balance. Money is taken out to cover spending and the tax it causes. After a death the survivor keeps the larger Social Security benefit and the other's pre-tax accounts. Taxable dividends aren't taxed each year, and Medicare premium surcharges aren't included.
@@ -489,13 +643,24 @@ function Tile({ label, children, hint, tone }: { label: string; children: ReactN
   );
 }
 
-function Results({ projection, plan }: { projection: Projection; plan: Plan }) {
+const chance = (rate: number) => `${Math.round(rate * 100)}%`;
+const chanceTone = (rate: number) => (rate >= 0.85 ? 'text-emerald-700 dark:text-emerald-400' : rate < 0.7 ? 'text-rose-700 dark:text-rose-400' : 'text-amber-700 dark:text-amber-400');
+
+function Results({ projection, plan, sim }: { projection: Projection; plan: Plan; sim: Simulation | null }) {
   const last = projection.rows[projection.rows.length - 1];
   return (
     <>
       <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
-        <Tile label="Does the money last?" tone={projection.runsOut ? 'bad' : 'good'} hint={projection.runsOut ? `Short from ${projection.runsOut.year}, at ${ageText(projection.runsOut.ages)}` : last ? `Through ${last.year}, at ${ageText(last.ages)}` : undefined}>
-          {projection.runsOut ? 'Runs short' : 'Yes'}
+        <Tile
+          label="Chance the money lasts"
+          hint={
+            <>
+              {sim ? `In ${sim.trials.toLocaleString()} market trials. ` : 'Running the trials… '}
+              {projection.runsOut ? `On steady returns, short from ${projection.runsOut.year}.` : last ? `On steady returns, lasts through ${last.year}.` : ''}
+            </>
+          }
+        >
+          {sim ? <span className={chanceTone(sim.successRate)}>{chance(sim.successRate)}</span> : '…'}
         </Tile>
         <Tile label="At retirement" hint={projection.atRetirement ? `In ${projection.atRetirement.year}, when both have retired` : 'Already retired'}>
           {projection.atRetirement ? short(projection.atRetirement.total) : '–'}
@@ -514,6 +679,15 @@ function Results({ projection, plan }: { projection: Projection; plan: Plan }) {
       <Card title="Balances over time, today's dollars" className="mb-5">
         <Chart rows={projection.rows} />
       </Card>
+      {sim && (
+        <Card title="Range of outcomes, today's dollars" className="mb-5">
+          <FanChart sim={sim} steady={projection.rows} />
+          <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
+            At the end: {short(sim.end.p50)} in a typical trial, {sim.end.p10 > 0.5 ? `${short(sim.end.p10)} when markets go badly (1 in 10 do worse)` : 'nothing left when markets go badly (the worst 1 in 10)'} and {short(sim.end.p90)} when they go well.
+            {sim.shortfall && ` When the money runs short, it's typically from ${sim.shortfall.medianYear}; in the earliest 1 in 10 of those, by ${sim.shortfall.earlyYear}.`}
+          </p>
+        </Card>
+      )}
     </>
   );
 }
@@ -644,5 +818,80 @@ function YearByYear({ projection }: { projection: Projection }) {
         </table>
       </div>
     </Card>
+  );
+}
+
+type Pct = 'p10' | 'p25' | 'p50' | 'p75' | 'p90';
+
+// The total balance across the trials: the middle half darker, 8 in 10 lighter, the
+// typical trial as a line and the steady plan dashed.
+function FanChart({ sim, steady }: { sim: Simulation; steady: Row[] }) {
+  const W = 720;
+  const H = 240;
+  const L = 56;
+  const B = 24;
+  const T = 10;
+  const R = 10;
+  const shape = useMemo(() => {
+    const ys = sim.years;
+    if (ys.length < 2) return null;
+    const max = Math.max(1, ...ys.map((y) => y.p90), ...steady.map((r) => r.total));
+    const raw = max / 4;
+    const mag = 10 ** Math.floor(Math.log10(raw));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((v) => v >= raw)!;
+    const top = Math.ceil(max / step) * step;
+    const x = (i: number) => L + (i / (ys.length - 1)) * (W - L - R);
+    const y = (v: number) => T + (1 - Math.max(0, v) / top) * (H - T - B);
+    const band = (lo: Pct, hi: Pct) =>
+      `${ys.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(p[hi]).toFixed(1)}`).join(' ')} ${ys
+        .map((p, i) => [i, p[lo]] as const)
+        .reverse()
+        .map(([i, v]) => `L${x(i).toFixed(1)} ${y(v).toFixed(1)}`)
+        .join(' ')} Z`;
+    const line = (values: number[]) => values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+    const ticks: number[] = [];
+    for (let v = 0; v <= top + step / 2; v += step) ticks.push(v);
+    return { outer: band('p10', 'p90'), inner: band('p25', 'p75'), median: line(ys.map((p) => p.p50)), steady: line(steady.map((r) => r.total)), ticks, y, x, labels: [0, Math.floor((ys.length - 1) / 2), ys.length - 1] };
+  }, [sim, steady]);
+  if (!shape) return <p className="text-sm text-slate-500">The chart needs at least two years.</p>;
+  return (
+    <>
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" role="img" aria-label="The range of total balances across the market trials, each year">
+        {shape.ticks.map((v) => (
+          <g key={v}>
+            <line x1={L} x2={W - R} y1={shape.y(v)} y2={shape.y(v)} className="stroke-slate-200 dark:stroke-slate-800" />
+            <text x={L - 8} y={shape.y(v) + 4} textAnchor="end" className="fill-slate-500 text-[11px]">
+              {short(v)}
+            </text>
+          </g>
+        ))}
+        <path d={shape.outer} style={{ fill: '#0d9488' }} fillOpacity={0.15} />
+        <path d={shape.inner} style={{ fill: '#0d9488' }} fillOpacity={0.3} />
+        <path d={shape.median} fill="none" style={{ stroke: '#0f766e' }} strokeWidth={2} />
+        <path d={shape.steady} fill="none" className="stroke-slate-500" strokeWidth={1.5} strokeDasharray="5 4" />
+        {shape.labels.map((i, k) => (
+          <text key={i} x={shape.x(i)} y={H - 6} textAnchor={k === 0 ? 'start' : k === 2 ? 'end' : 'middle'} className="fill-slate-500 text-[11px]">
+            {sim.years[i].year} · {ageText(sim.years[i].ages)}
+          </text>
+        ))}
+      </svg>
+      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="size-2.5 rounded-sm bg-teal-600/30" aria-hidden />
+          Middle half of trials
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="size-2.5 rounded-sm bg-teal-600/15" aria-hidden />8 in 10 trials
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-0.5 w-4 bg-teal-700" aria-hidden />
+          Typical trial
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="w-4 border-t border-dashed border-slate-500" aria-hidden />
+          Steady returns
+        </span>
+      </div>
+    </>
   );
 }

@@ -8,6 +8,7 @@ const path = require('node:path');
 const { openDatabase } = require('../server/db');
 const { buildApp } = require('../server/dist/app');
 const { incomeTax, taxableSocialSecurity, rmd, rmdAge, STATES } = require('../server/dist/retirement/tax');
+const { simulate, lognormal, percentile, randomSource } = require('../server/dist/retirement/simulate');
 const { claimFactor, spousalFactor, fullAgeMonths, returnsFor, project } = require('../server/dist/retirement/project');
 
 const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 0.01, `${message ?? ''} ${actual} ≠ ${expected}`);
@@ -195,6 +196,56 @@ test('a survivor takes over the pre-tax accounts and files single', () => {
   assert.equal(after.end.pre_tax_spouse, 150000);
 });
 
+/* ---------- Monte Carlo ---------- */
+
+const still = { stocks: 0, bonds: 0, cash: 0 };
+
+test('the random pieces: percentiles, a lognormal that keeps its average, a repeatable seed', () => {
+  assert.equal(percentile([1, 2, 3, 4], 0.5), 2.5);
+  assert.equal(percentile([1, 2, 3, 4], 0), 1);
+  assert.equal(percentile([1, 2, 3, 4], 1), 4);
+  near(lognormal(0.07, 0, 1.5), 0.07, 'no spread: always the average');
+  const random = randomSource(7);
+  let sum = 0;
+  for (let i = 0; i < 200000; i++) sum += lognormal(0.07, 0.17, random.normal());
+  assert.ok(Math.abs(sum / 200000 - 0.07) < 0.002, 'the average return is the expected one');
+  const a = randomSource(1);
+  const b = randomSource(1);
+  assert.deepEqual([a.next(), a.next()], [b.next(), b.next()]);
+});
+
+test('with no swings every trial is the steady plan', () => {
+  const p = plan({ me: person({ takeHome: 100000, contributions: { pre_tax: 20000, roth: 0, hsa: 0 } }), spending: 80000 });
+  const start = { balances: { ...none, cash: 50000, taxable: 100000, pre_tax: 200000 }, taxableBasis: 100000 };
+  const sim = simulate(p, start, allStocks, 2026, { trials: 100, volatility: still });
+  assert.equal(sim.successRate, 1);
+  assert.deepEqual(sim.years.map((y) => [y.year, y.p10, y.p50, y.p90]), [
+    [2026, 390000, 390000, 390000],
+    [2027, 310000, 310000, 310000],
+    [2028, 230000, 230000, 230000],
+    [2029, 150000, 150000, 150000],
+  ]);
+  assert.equal(sim.shortfall, null);
+
+  const short = simulate({ ...p, spending: 200000 }, { balances: { ...none, cash: 100000 }, taxableBasis: 0 }, allStocks, 2026, { trials: 100, volatility: still });
+  assert.equal(short.successRate, 0);
+  assert.deepEqual(short.shortfall, { medianYear: 2027, earlyYear: 2027 });
+});
+
+test('swings spread the outcomes around the steady plan, the same way each time', () => {
+  const markets = { stocks: 0.07, bonds: 0.04, cash: 0.03, inflation: 0.03 };
+  const p = plan({ me: person({ retireAge: 60, planToAge: 90 }), markets, spending: 40000 });
+  const start = { balances: { ...none, taxable: 1000000 }, taxableBasis: 1000000 };
+  const once = simulate(p, start, allStocks, 2026, { trials: 400 });
+  const again = simulate(p, start, allStocks, 2026, { trials: 400 });
+  assert.deepEqual(once, again, 'a fixed seed gives the same answer');
+  const last = once.years.at(-1);
+  assert.ok(last.p10 < last.p50 && last.p50 < last.p90);
+  assert.ok(once.successRate > 0.5 && once.successRate < 1, String(once.successRate));
+  const calmer = simulate({ ...p, markets: { ...markets, volatility: { stocks: 0.05, bonds: 0.02 } } }, start, allStocks, 2026, { trials: 400 });
+  assert.ok(calmer.years.at(-1).p90 - calmer.years.at(-1).p10 < last.p90 - last.p10, 'smaller swings, a narrower range');
+});
+
 /* ---------- The API ---------- */
 
 let dir;
@@ -252,4 +303,33 @@ test('the plan starts from Wealth balances, can be tried without saving, and is 
   data = await get('/api/retirement');
   assert.equal(data.plan.spending, 40000);
   assert.equal(data.projection.rows.length, 31);
+});
+
+test('trials, saved scenarios and the comparison', async () => {
+  const year = new Date().getFullYear();
+  const mine = plan({ me: person({ birthYear: year - 60, retireAge: 62, planToAge: 90 }), spending: 40000, markets: { stocks: 0.07, bonds: 0.045, cash: 0.035, inflation: 0.028 } });
+  const sim = await post('/api/retirement/simulate', { plan: mine, trials: 200 });
+  assert.equal(sim.trials, 200);
+  assert.equal(sim.years.length, 31);
+  await assert.rejects(post('/api/retirement/simulate', { plan: mine, trials: 50 }), { status: 400 });
+
+  let { scenarios } = await post('/api/retirement/scenarios', { name: 'Retire at 65', plan: { ...mine, me: { ...mine.me, retireAge: 65 } } });
+  assert.deepEqual(scenarios.map((x) => [x.id, x.name]), [[1, 'Retire at 65']]);
+  ({ scenarios } = await post('/api/retirement/scenarios', { name: 'Spend less', plan: { ...mine, spending: 30000 } }));
+  ({ scenarios } = await post('/api/retirement/scenarios', { name: 'retire at 65', plan: { ...mine, me: { ...mine.me, retireAge: 66 } } }));
+  assert.deepEqual(scenarios.map((x) => [x.id, x.name, x.plan.me.retireAge]), [[1, 'retire at 65', 66], [2, 'Spend less', 62]], 'the same name replaces it');
+  await assert.rejects(post('/api/retirement/scenarios', { name: ' ', plan: mine }), { status: 400 });
+  assert.equal((await get('/api/retirement')).scenarios.length, 2);
+
+  const compared = await post('/api/retirement/compare', mine);
+  assert.deepEqual(compared.map((c) => [c.id, c.name, c.retireYear, c.spending]), [
+    [null, 'This plan', year + 2, 40000],
+    [1, 'retire at 65', year + 6, 40000],
+    [2, 'Spend less', year + 2, 30000],
+  ]);
+  assert.ok(compared.every((c) => c.successRate >= 0 && c.successRate <= 1));
+
+  ({ scenarios } = await post('/api/retirement/scenarios/1/delete'));
+  assert.deepEqual(scenarios.map((x) => x.name), ['Spend less']);
+  await assert.rejects(post('/api/retirement/scenarios/1/delete'), { status: 404 });
 });

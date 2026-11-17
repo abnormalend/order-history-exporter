@@ -59,6 +59,8 @@ export interface Markets {
   bonds: number;
   cash: number;
   inflation: number;
+  // How much stocks and bonds swing a year, for the Monte Carlo trials.
+  volatility?: { stocks: number; bonds: number };
 }
 export interface TaxPlan {
   // False works the plan out before tax, as a comparison.
@@ -177,7 +179,11 @@ export function stateRules(taxes: TaxPlan): StateRules {
   return { ...base, rate: taxes.stateRate ?? base.rate, deduction: taxes.stateDeduction ?? base.deduction };
 }
 
-export function project(plan: Plan, start: Start | Balances, mix: Mix, startYear: number): Projection {
+// Real returns for each year of the plan, in order, in place of the steady ones (a
+// Monte Carlo trial); a year past the list uses the steady return.
+export type YearReturns = { invested: number; cash: number }[];
+
+export function project(plan: Plan, start: Start | Balances, mix: Mix, startYear: number, yearReturns?: YearReturns): Projection {
   const taxes = { ...DEFAULT_TAXES, ...(plan.taxes ?? {}) };
   const state = stateRules(taxes);
   const returns = returnsFor(plan.markets, mix);
@@ -220,9 +226,10 @@ export function project(plan: Plan, start: Start | Balances, mix: Mix, startYear
 
     // RMDs are worked out on the year's opening balance; then the year's growth.
     const rmds = preTaxOf.map((b, i) => (people[i] && alive[i] ? rmd(people[i]!.birthYear, ages[i]!, balances[b]) : 0));
+    const r = yearReturns?.[year - startYear] ?? returns;
     let growth = 0;
     for (const b of BUCKETS) {
-      const g = balances[b] > 0 ? balances[b] * (b === 'cash' ? returns.cash : returns.invested) : 0;
+      const g = balances[b] > 0 ? balances[b] * (b === 'cash' ? r.cash : r.invested) : 0;
       balances[b] += g;
       growth += g;
     }
