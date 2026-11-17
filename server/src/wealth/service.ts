@@ -280,7 +280,7 @@ export function wealthService({ db, bank }: { db: DatabaseSync; bank: BankStore 
     const drift = invested.filter((a) => a.positions && a.balance !== null && a.source !== 'manual' && Math.abs(a.positions.total - a.balance) > Math.max(DRIFT_DOLLARS, Math.abs(a.balance) * DRIFT_SHARE));
     for (const a of drift)
       checks.push({ key: `drift:${a.id}`, title: `${a.name}: positions add up to ${wholeDollars(a.positions!.total)}, the balance is ${wholeDollars(a.balance!)}`, detail: `The positions are from ${a.positions!.asOf}. Money may have moved since; a fresh positions file would match.`, accountIds: [a.id] });
-    const missing = notBrokenDown.filter((n) => !n.countedAs && !NO_POSITIONS.has(invested.find((a) => a.id === n.id)?.investType ?? ''));
+    const missing = notBrokenDown.filter((n) => !n.countedAs && n.balance >= 100 && !NO_POSITIONS.has(invested.find((a) => a.id === n.id)?.investType ?? ''));
     if (missing.length)
       checks.push({ key: 'no-positions', title: `${wholeDollars(missing.reduce((s, n) => s + n.balance, 0))} isn't broken down into holdings`, detail: `No positions file yet for ${missing.map((n) => n.name).join(', ')}.`, accountIds: missing.map((n) => n.id) });
     const nobody = invested.filter((a) => !a.holder && (a.balance ?? 0) !== 0);

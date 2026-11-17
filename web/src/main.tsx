@@ -9,6 +9,7 @@ import { BusinessProvider } from './business';
 import { Accounts } from './pages/Accounts';
 import { Personal } from './pages/Personal';
 import { Wealth } from './pages/Wealth';
+import { Retirement } from './pages/Retirement';
 import { Dashboard } from './pages/Dashboard';
 import { Import } from './pages/Import';
 import { ImportDetail } from './pages/ImportHistory';
@@ -117,6 +118,7 @@ function App() {
         <Route path="/accounts" element={<Accounts meta={meta} />} />
         <Route path="/personal" element={<Personal />} />
         <Route path="/wealth" element={<Wealth />} />
+        <Route path="/retirement" element={<Retirement />} />
         <Route path="/import" element={<Import />} />
         <Route path="/import/:id" element={<ImportDetail />} />
         <Route path="/more" element={<More />} />

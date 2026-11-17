@@ -1,0 +1,73 @@
+// The retirement plan: read it with its projection, try changes without saving, save.
+// Owners only (a family login is refused before reaching these).
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import type { RetirementService } from '../retirement/service';
+import type { Plan } from '../retirement/project';
+import { HttpError } from '../params';
+import type { AuthedRequest } from '../app';
+
+const thisYear = new Date().getFullYear();
+const dollars = z.number().min(0).max(1e8);
+const rate = z.number().min(-0.5).max(0.5);
+const person = z
+  .object({
+    name: z.string().trim().min(1).max(40),
+    birthYear: z.number().int().min(thisYear - 100, 'Check the birth year.').max(thisYear - 16, 'Check the birth year.'),
+    retireAge: z.number().int().min(30).max(85),
+    planToAge: z.number().int().min(60).max(110),
+    takeHome: dollars,
+    contributions: z.object({ pre_tax: dollars, roth: dollars, hsa: dollars }),
+    ssAtFullAge: z.number().min(0).max(20000),
+    ssClaimAge: z.number().min(62, 'Social Security starts at 62 at the earliest.').max(70, 'Waiting past 70 adds nothing.'),
+  })
+  .refine((p) => p.planToAge > p.retireAge, 'The plan has to run past retiring.');
+const planSchema = z.object({
+  me: person,
+  spouse: person.nullable(),
+  spending: dollars,
+  spendingChangeAt80: z.number().min(-0.9).max(1),
+  markets: z.object({ stocks: rate, bonds: rate, cash: rate, inflation: z.number().min(-0.05).max(0.2) }),
+  streams: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(60),
+        owner: z.enum(['me', 'spouse']),
+        startAge: z.number().int().min(0).max(110),
+        endAge: z.number().int().min(0).max(120).nullable(),
+        yearly: z.number().min(0).max(1e8),
+        inflationAdjusted: z.boolean(),
+      })
+    )
+    .max(30),
+  events: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(60),
+        year: z.number().int().min(thisYear - 1).max(thisYear + 80),
+        years: z.number().int().min(1).max(60),
+        amount: z.number().min(-1e8).max(1e8),
+      })
+    )
+    .max(50),
+});
+
+function parse(body: unknown): Plan {
+  const result = planSchema.safeParse(body);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    throw new HttpError(400, issue ? `${issue.path.join(' › ') || 'Plan'}: ${issue.message}` : 'Invalid plan.');
+  }
+  return result.data as Plan;
+}
+
+export function retirementRoutes(app: FastifyInstance, retirement: RetirementService) {
+  app.get('/api/retirement', async () => retirement.get());
+  app.post('/api/retirement/preview', async (request) => retirement.preview(parse(request.body)));
+  app.post('/api/retirement/plan', async (request) => {
+    const plan = parse(request.body);
+    const projection = retirement.save(plan);
+    (request as AuthedRequest).audit('retirement.plan', { people: plan.spouse ? 2 : 1, streams: plan.streams.length, events: plan.events.length });
+    return { projection };
+  });
+}

@@ -44,6 +44,8 @@ import { personalService } from './personal/service';
 import { peopleRoutes } from './routes/people';
 import { peopleService } from './people/service';
 import { wealthRoutes } from './routes/wealth';
+import { retirementRoutes } from './routes/retirement';
+import { retirementService } from './retirement/service';
 import { wealthService } from './wealth/service';
 import type { StayService } from './stays/service';
 import { SYNC_ROUTES, syncRoutes } from './routes/sync';
@@ -237,9 +239,12 @@ export function buildApp(options: AppOptions): FastifyInstance {
   loanRoutes(app, loanService({ db: db.raw, bank }));
   const pl = plService({ db: db.raw, bank, correlate });
   plRoutes(app, pl);
-  personalRoutes(app, personalService({ db: db.raw }));
+  const personal = personalService({ db: db.raw });
+  personalRoutes(app, personal);
   peopleRoutes(app, peopleService({ db: db.raw, auth: store }));
-  wealthRoutes(app, wealthService({ db: db.raw, bank }));
+  const wealth = wealthService({ db: db.raw, bank });
+  wealthRoutes(app, wealth);
+  retirementRoutes(app, retirementService({ bank, wealth, personal }));
   returnsRoutes(app, returnsService({ db: db.raw, pl }), (id) => correlate.entities().some((e) => e.id === id));
   authRoutes(app, store, tokens);
 
