@@ -7,10 +7,13 @@ const path = require('node:path');
 
 const { openDatabase } = require('../server/db');
 const { buildApp } = require('../server/dist/app');
+const { incomeTax, taxableSocialSecurity, rmd, rmdAge, STATES } = require('../server/dist/retirement/tax');
 const { claimFactor, spousalFactor, fullAgeMonths, returnsFor, project } = require('../server/dist/retirement/project');
 
 const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 0.01, `${message ?? ''} ${actual} ≠ ${expected}`);
 const flat = { stocks: 0.02, bonds: 0.02, cash: 0.02, inflation: 0.02 }; // every real return is 0
+const noTax = { enabled: false, state: 'none', rothConversionsTo: null, withdrawalOrder: 'standard', deferredYears: 5 };
+const taxed = (over = {}) => ({ ...noTax, enabled: true, ...over });
 const person = (over = {}) => ({
   name: 'Example',
   birthYear: 1966,
@@ -22,8 +25,8 @@ const person = (over = {}) => ({
   ssClaimAge: 67,
   ...over,
 });
-const plan = (over = {}) => ({ me: person(), spouse: null, spending: 0, spendingChangeAt80: 0, markets: flat, streams: [], events: [], ...over });
-const none = { cash: 0, taxable: 0, pre_tax: 0, hsa: 0, roth: 0 };
+const plan = (over = {}) => ({ me: person(), spouse: null, spending: 0, spendingChangeAt80: 0, markets: flat, streams: [], events: [], taxes: noTax, ...over });
+const none = { cash: 0, taxable: 0, pre_tax: 0, pre_tax_spouse: 0, deferred: 0, hsa: 0, roth: 0 };
 const allStocks = { stocks: 1, bonds: 0, cash: 0 };
 
 test('Social Security: full retirement age, early cuts, delayed credits and the spousal half', () => {
@@ -102,6 +105,96 @@ test('Social Security for a couple: the spousal half, then the survivor keeps th
   assert.equal(result.rows[result.rows.length - 1].year, 2032, 'until the second reaches the plan age');
 });
 
+/* ---------- Taxes and RMDs ---------- */
+
+const none0 = STATES.none;
+const tax = (over) => incomeTax({ filing: 'mfj', year: 2026, over65: 0, ordinary: 0, retirement: 0, socialSecurity: 0, gains: 0, state: none0, ...over });
+
+test('federal tax by hand: brackets, the senior deduction, gains on top, Social Security', () => {
+  // 100,000 − 32,200 = 67,800 taxable: 24,800 at 10% + 43,000 at 12%.
+  let t = tax({ ordinary: 100000 });
+  assert.equal(t.taxableOrdinary, 67800);
+  assert.equal(t.federal, 7640);
+  // Both 65+: 32,200 + 2 × 1,650 + 2 × 6,000 = 47,500 off, so 52,500 taxable.
+  t = tax({ ordinary: 100000, over65: 2 });
+  assert.equal(t.taxableOrdinary, 52500);
+  assert.equal(t.federal, 5804);
+  assert.equal(tax({ ordinary: 100000, over65: 2, year: 2029 }).taxableOrdinary, 64500, 'the extra senior deduction ends after 2028');
+  // Gains under the 0% line pay nothing; above it, 15%.
+  assert.equal(tax({ gains: 50000 }).federal, 0);
+  near(tax({ ordinary: 130900, gains: 10000 }).federal, bracketAt(98700) + 9800 * 0.15, "200 still fits under the 0% line");
+  // Provisional income 30,000 + 20,000 = 50,000: 6,000 (half the middle band) + 85% of 6,000.
+  assert.equal(taxableSocialSecurity('mfj', 40000, 30000), 11100);
+  assert.equal(taxableSocialSecurity('mfj', 40000, 10000), 0);
+});
+
+function bracketAt(taxable) {
+  return 2480 + (Math.min(taxable, 100800) - 24800) * 0.12;
+}
+
+test('state tax: North Carolina taxes retirement income, Illinois does not', () => {
+  near(tax({ ordinary: 100000, retirement: 100000, state: STATES.NC }).state, (100000 - 25500) * 0.0399);
+  assert.equal(tax({ ordinary: 100000, retirement: 100000, state: STATES.IL }).state, 0);
+  near(tax({ ordinary: 100000, retirement: 0, state: STATES.IL }).state, (100000 - 5700) * 0.0495);
+});
+
+test('RMDs: the starting age by birth year and the uniform table', () => {
+  assert.equal(rmdAge(1950), 72);
+  assert.equal(rmdAge(1955), 73);
+  assert.equal(rmdAge(1966), 75);
+  assert.equal(rmd(1955, 73, 265000), 10000);
+  assert.equal(rmd(1966, 73, 265000), 0, 'not until 75 for someone born in 1966');
+});
+
+test('the projection takes RMDs, and saves what is not spent', () => {
+  const result = project(plan({ me: person({ birthYear: 1951, retireAge: 60, planToAge: 76 }) }), { ...none, pre_tax: 246000 }, allStocks, 2026);
+  assert.equal(result.rows[0].rmd, 10000, '246,000 ÷ 24.6 at 75');
+  assert.equal(result.rows[0].saved, 10000);
+  assert.equal(result.rows[0].end.taxable, 10000);
+});
+
+test('deferred compensation pays out in five equal installments from the year after retiring', () => {
+  const me = person({ retireAge: 61, planToAge: 70, contributions: { pre_tax: 0, roth: 0, hsa: 0, deferred: 20000 }, takeHome: 1 });
+  const result = project(plan({ me }), { ...none, deferred: 80000 }, allStocks, 2026);
+  // 2026: still working, 20,000 more goes in; retires 2027; paid 2028–2032.
+  const paid = result.rows.map((r) => [r.year, r.deferredPaid]);
+  assert.deepEqual(paid.slice(0, 8), [[2026, 0], [2027, 0], [2028, 20000], [2029, 20000], [2030, 20000], [2031, 20000], [2032, 20000], [2033, 0]]);
+  assert.equal(result.rows.at(-1).end.deferred, 0);
+});
+
+test('taking money out covers its own tax', () => {
+  const me = person({ retireAge: 55, planToAge: 61 });
+  const result = project(plan({ me, spending: 50000, taxes: taxed() }), { ...none, pre_tax: 1000000 }, allStocks, 2026);
+  // Single: W − (1,240 + 12% × (W − 16,100 − 12,400)) = 50,000, so W = 47,820 ÷ 0.88.
+  const [first] = result.rows;
+  assert.ok(Math.abs(first.withdrawn.pre_tax - 47820 / 0.88) < 1, String(first.withdrawn.pre_tax));
+  assert.ok(Math.abs(first.tax.federal - (47820 / 0.88 - 50000)) < 1);
+  assert.equal(first.shortfall, 0);
+  assert.ok(result.lifetimeTax > first.tax.federal);
+});
+
+test('Roth conversions fill the chosen bracket, with the tax paid from cash', () => {
+  const me = person({ retireAge: 55, planToAge: 61 });
+  const result = project(plan({ me, taxes: taxed({ rothConversionsTo: 0.12 }) }), { ...none, cash: 100000, pre_tax: 1000000 }, allStocks, 2026);
+  const [first] = result.rows;
+  // Single: 16,100 deduction + 50,400 to the top of the 12% bracket.
+  assert.equal(first.conversion, 66500);
+  assert.equal(first.taxableOrdinary, 50400);
+  assert.equal(first.tax.federal, 5800);
+  assert.equal(first.withdrawn.cash, 5800);
+  assert.equal(first.end.roth, 66500);
+  assert.equal(first.end.pre_tax, 1000000 - 66500);
+});
+
+test('a survivor takes over the pre-tax accounts and files single', () => {
+  const me = person({ birthYear: 1960, retireAge: 60, planToAge: 67 });
+  const spouse = person({ birthYear: 1960, retireAge: 60, planToAge: 70 });
+  const result = project(plan({ me, spouse }), { ...none, pre_tax: 100000, pre_tax_spouse: 50000 }, allStocks, 2026);
+  const after = result.rows.find((r) => r.year === 2028);
+  assert.equal(after.end.pre_tax, 0);
+  assert.equal(after.end.pre_tax_spouse, 150000);
+});
+
 /* ---------- The API ---------- */
 
 let dir;
@@ -145,7 +238,7 @@ test('the plan starts from Wealth balances, can be tried without saving, and is 
   await post('/api/wealth/accounts', { name: 'Example 529', investType: '529', holder: 'joint', balance: 20000 });
   let data = await get('/api/retirement');
   assert.equal(data.plan, null);
-  assert.deepEqual(data.start.balances, { cash: 0, taxable: 0, pre_tax: 300000, hsa: 0, roth: 50000 });
+  assert.deepEqual(data.start.balances, { ...none, pre_tax: 300000, roth: 50000 });
   assert.deepEqual(data.start.left.map((l) => l.why), ['education'], "a 529 isn't for retirement");
 
   const year = new Date().getFullYear();

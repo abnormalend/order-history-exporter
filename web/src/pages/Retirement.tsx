@@ -8,7 +8,7 @@ import { post, useApi } from '../api';
 import { wholeMoney } from '../format';
 import { Banner, Button, Card, Field, Input, Loading, PageHeader, Select, cx } from '../ui';
 
-type Bucket = 'cash' | 'taxable' | 'pre_tax' | 'hsa' | 'roth';
+type Bucket = 'cash' | 'taxable' | 'pre_tax' | 'pre_tax_spouse' | 'deferred' | 'hsa' | 'roth';
 type Balances = Record<Bucket, number>;
 interface Person {
   name: string;
@@ -16,7 +16,7 @@ interface Person {
   retireAge: number;
   planToAge: number;
   takeHome: number;
-  contributions: { pre_tax: number; roth: number; hsa: number };
+  contributions: { pre_tax: number; roth: number; hsa: number; deferred?: number };
   ssAtFullAge: number;
   ssClaimAge: number;
 }
@@ -27,6 +27,7 @@ interface Stream {
   endAge: number | null;
   yearly: number;
   inflationAdjusted: boolean;
+  taxable?: boolean;
 }
 interface LifeEvent {
   name: string;
@@ -48,6 +49,22 @@ interface Plan {
   markets: Markets;
   streams: Stream[];
   events: LifeEvent[];
+  taxes?: TaxPlan;
+}
+interface TaxPlan {
+  enabled: boolean;
+  state: string;
+  stateRate?: number;
+  stateDeduction?: number;
+  rothConversionsTo: number | null;
+  withdrawalOrder: 'standard' | 'pretax_first';
+  deferredYears: number;
+}
+interface StateOption {
+  key: string;
+  label: string;
+  rate: number;
+  deduction: number;
 }
 interface Row {
   year: number;
@@ -59,6 +76,12 @@ interface Row {
   spending: number;
   contributions: number;
   growth: number;
+  rmd: number;
+  deferredPaid: number;
+  conversion: number;
+  gains: number;
+  tax: { federal: number; state: number };
+  taxableOrdinary: number;
   withdrawn: Balances;
   saved: number;
   shortfall: number;
@@ -72,6 +95,8 @@ interface Projection {
   runsOut: { year: number; ages: [number | null, number | null] } | null;
   atRetirement: { year: number; total: number } | null;
   atEnd: number;
+  lifetimeTax: number;
+  rmdStarts: { me: number; spouse: number | null };
 }
 interface Data {
   plan: Plan | null;
@@ -81,7 +106,9 @@ interface Data {
     mix: { stocks: number; bonds: number; cash: number };
     spending: { amount: number; from: string; to: string; firstMonth: string | null };
   };
-  defaults: { markets: Markets };
+  defaults: { markets: Markets; taxes: TaxPlan };
+  states: StateOption[];
+  taxYear: number;
   projection: Projection | null;
   startYear: number;
 }
@@ -90,10 +117,12 @@ const BUCKETS: { key: Bucket; label: string; colour: string }[] = [
   { key: 'cash', label: 'Cash', colour: '#64748b' },
   { key: 'taxable', label: 'Taxable', colour: '#d97706' },
   { key: 'pre_tax', label: 'Pre-tax', colour: '#0d9488' },
+  { key: 'pre_tax_spouse', label: 'Pre-tax, spouse', colour: '#14b8a6' },
+  { key: 'deferred', label: 'Deferred comp', colour: '#65a30d' },
   { key: 'hsa', label: 'Health savings', colour: '#0284c7' },
   { key: 'roth', label: 'Roth', colour: '#7c3aed' },
 ];
-const newPerson = (name: string, birthYear: number): Person => ({ name, birthYear, retireAge: 65, planToAge: 95, takeHome: 0, contributions: { pre_tax: 0, roth: 0, hsa: 0 }, ssAtFullAge: 0, ssClaimAge: 67 });
+const newPerson = (name: string, birthYear: number): Person => ({ name, birthYear, retireAge: 65, planToAge: 95, takeHome: 0, contributions: { pre_tax: 0, roth: 0, hsa: 0, deferred: 0 }, ssAtFullAge: 0, ssClaimAge: 67 });
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 const short = (n: number) => (Math.abs(n) >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : `$${Math.round(n / 1e3)}K`);
 const ageText = (ages: [number | null, number | null]) => ages.filter((a) => a !== null).join(' / ');
@@ -135,7 +164,7 @@ export function Retirement() {
 function Planner({ data }: { data: Data }) {
   const [plan, setPlan] = useState<Plan>(
     () =>
-      data.plan ?? {
+      (data.plan && { ...data.plan, taxes: { ...data.defaults.taxes, ...data.plan.taxes } }) || {
         me: newPerson('You', data.startYear - 55),
         spouse: newPerson('Spouse', data.startYear - 53),
         spending: Math.round(data.start.spending.amount / 1000) * 1000,
@@ -143,8 +172,11 @@ function Planner({ data }: { data: Data }) {
         markets: data.defaults.markets,
         streams: [],
         events: [],
+        taxes: data.defaults.taxes,
       }
   );
+  const taxes = { ...data.defaults.taxes, ...plan.taxes };
+  const setTaxes = (change: Partial<TaxPlan>) => setPlan((p) => ({ ...p, taxes: { ...data.defaults.taxes, ...p.taxes, ...change } }));
   const [projection, setProjection] = useState<Projection | null>(data.projection);
   const [problem, setProblem] = useState('');
   const [saving, setSaving] = useState(false);
@@ -185,7 +217,7 @@ function Planner({ data }: { data: Data }) {
     <>
       <PageHeader
         title="Retirement plan"
-        description="A year-by-year plan on steady returns, in today's dollars. Taxes and required withdrawals come next; for now money taken out counts at its full value."
+        description={`A year-by-year plan on steady returns, in today's dollars, after federal and state tax on ${data.taxYear} rules, with required withdrawals.`}
         actions={
           <Button variant="primary" busy={saving} disabled={!changed} onClick={save}>
             {changed ? 'Save plan' : 'Saved'}
@@ -271,6 +303,9 @@ function Planner({ data }: { data: Data }) {
               <Field label="Into Roth a year">
                 <Num value={person.contributions.roth} onChange={(n) => setPerson(key, { contributions: { ...person.contributions, roth: n } })} />
               </Field>
+              <Field label="Into deferred comp a year" hint="An excess or nonqualified plan, match included">
+                <Num value={person.contributions.deferred ?? 0} onChange={(n) => setPerson(key, { contributions: { ...person.contributions, deferred: n } })} />
+              </Field>
               <Field label="Into HSA a year">
                 <Num value={person.contributions.hsa} onChange={(n) => setPerson(key, { contributions: { ...person.contributions, hsa: n } })} />
               </Field>
@@ -284,6 +319,63 @@ function Planner({ data }: { data: Data }) {
           ))}
         </div>
         <p className="mt-3 text-xs text-slate-500">Left-over take-home pay, after spending, is saved in the taxable account each year.</p>
+      </Card>
+
+      <Card
+        title="Taxes"
+        className="mb-5"
+        actions={
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input type="checkbox" className="size-4 accent-emerald-600" checked={taxes.enabled} onChange={(e) => setTaxes({ enabled: e.target.checked })} />
+            Work out taxes
+          </label>
+        }
+      >
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="State in retirement">
+            <Select value={taxes.state} disabled={!taxes.enabled} onChange={(e) => setTaxes({ state: e.target.value })}>
+              {data.states.map((s) => (
+                <option key={s.key} value={s.key}>
+                  {s.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {taxes.state === 'custom' && (
+            <>
+              <Field label="State rate, %" hint="A flat rate on income">
+                <Num percent value={taxes.stateRate ?? 0.05} onChange={(stateRate) => setTaxes({ stateRate })} />
+              </Field>
+              <Field label="State deduction, a couple">
+                <Num value={taxes.stateDeduction ?? 0} onChange={(stateDeduction) => setTaxes({ stateDeduction })} />
+              </Field>
+            </>
+          )}
+          <Field label="Roth conversions" hint="From retiring until RMDs start">
+            <Select value={taxes.rothConversionsTo ?? ''} disabled={!taxes.enabled} onChange={(e) => setTaxes({ rothConversionsTo: e.target.value ? Number(e.target.value) : null })}>
+              <option value="">None</option>
+              {[0.12, 0.22, 0.24, 0.32].map((r) => (
+                <option key={r} value={r}>
+                  Fill the {Math.round(r * 100)}% bracket
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Take money from">
+            <Select value={taxes.withdrawalOrder} onChange={(e) => setTaxes({ withdrawalOrder: e.target.value as TaxPlan['withdrawalOrder'] })}>
+              <option value="standard">Taxable first, then pre-tax, then Roth</option>
+              <option value="pretax_first">Pre-tax first, then taxable, then Roth</option>
+            </Select>
+          </Field>
+          <Field label="Deferred comp paid over, years" hint="Starting the year after you retire">
+            <Num value={taxes.deferredYears} onChange={(deferredYears) => setTaxes({ deferredYears })} />
+          </Field>
+        </div>
+        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+          Married filing jointly while both are alive, single after. Pay while working is take-home, so it isn't taxed again here. Selling taxable holdings is taxed at long-term gains rates on the
+          gain over what was paid. RMDs start in {projection?.rmdStarts.me ?? '…'}
+          {plan.spouse && projection?.rmdStarts.spouse ? ` (${plan.spouse.name}: ${projection.rmdStarts.spouse})` : ''}. Brackets rise with inflation, so {data.taxYear} rules apply to every year.
+        </p>
       </Card>
 
       <div className="mb-5 grid gap-5 lg:grid-cols-2">
@@ -324,6 +416,10 @@ function Planner({ data }: { data: Data }) {
                     <label className="inline-flex items-center gap-2 pb-2 text-xs">
                       <input type="checkbox" className="size-4 accent-emerald-600" checked={s.inflationAdjusted} onChange={(e) => set({ inflationAdjusted: e.target.checked })} />
                       Rises with inflation
+                    </label>
+                    <label className="inline-flex items-center gap-2 pb-2 text-xs">
+                      <input type="checkbox" className="size-4 accent-emerald-600" checked={s.taxable !== false} onChange={(e) => set({ taxable: e.target.checked })} />
+                      Taxed
                     </label>
                     <IconRemove label={`Remove ${s.name}`} onClick={() => setPlan({ ...plan, streams: plan.streams.filter((_, j) => j !== i) })} />
                   </div>
@@ -369,7 +465,7 @@ function Planner({ data }: { data: Data }) {
 
       {projection && <YearByYear projection={projection} />}
       <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-        A planning tool, not tax or investment advice. Growth is on each year's opening balance; money is taken from cash, then taxable, pre-tax, health savings and Roth. After a death the survivor keeps the larger Social Security benefit.
+        A planning tool, not tax or investment advice. Growth is on each year's opening balance, and RMDs use that balance. Money is taken out to cover spending and the tax it causes. After a death the survivor keeps the larger Social Security benefit and the other's pre-tax accounts. Taxable dividends aren't taxed each year, and Medicare premium surcharges aren't included.
       </p>
     </>
   );
@@ -397,19 +493,22 @@ function Results({ projection, plan }: { projection: Projection; plan: Plan }) {
   const last = projection.rows[projection.rows.length - 1];
   return (
     <>
-      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <Tile label="Does the money last?" tone={projection.runsOut ? 'bad' : 'good'} hint={projection.runsOut ? `Short from ${projection.runsOut.year}, at ${ageText(projection.runsOut.ages)}` : last ? `Through ${last.year}, at ${ageText(last.ages)}` : undefined}>
           {projection.runsOut ? 'Runs short' : 'Yes'}
         </Tile>
         <Tile label="At retirement" hint={projection.atRetirement ? `In ${projection.atRetirement.year}, when both have retired` : 'Already retired'}>
           {projection.atRetirement ? short(projection.atRetirement.total) : '–'}
         </Tile>
-        <Tile label="Left at the end" hint="Today's dollars">
+        <Tile label="Left at the end" hint={last && last.end.pre_tax + last.end.pre_tax_spouse + last.end.deferred > 0.5 ? `${short(last.end.pre_tax + last.end.pre_tax_spouse + last.end.deferred)} of it pre-tax, still to be taxed` : "Today's dollars, all after tax"}>
           {short(projection.atEnd)}
         </Tile>
         <Tile label="Social Security a year" hint={plan.spouse ? `${plan.me.name} · ${plan.spouse.name}, once claimed` : 'Once claimed'}>
           {wholeMoney(projection.socialSecurity.me)}
           {projection.socialSecurity.spouse !== null && <span className="text-base text-slate-500"> · {wholeMoney(projection.socialSecurity.spouse)}</span>}
+        </Tile>
+        <Tile label="Lifetime tax" hint="Federal and state, from now on">
+          {short(projection.lifetimeTax)}
         </Tile>
       </div>
       <Card title="Balances over time, today's dollars" className="mb-5">
@@ -492,7 +591,7 @@ function YearByYear({ projection }: { projection: Projection }) {
   return (
     <Card title="Year by year, today's dollars" padded={false}>
       <div className="max-h-[32rem] overflow-auto">
-        <table className="w-full min-w-[56rem] text-sm">
+        <table className="w-full min-w-[68rem] text-sm">
           <thead className="sticky top-0 bg-white text-xs text-slate-500 dark:bg-slate-900">
             <tr>
               <th className="px-2 py-2 text-left font-medium">Year</th>
@@ -500,10 +599,13 @@ function YearByYear({ projection }: { projection: Projection }) {
               <th className="px-2 py-2 text-right font-medium">Pay</th>
               <th className="px-2 py-2 text-right font-medium">Social Security</th>
               <th className="px-2 py-2 text-right font-medium">Pensions, other</th>
+              <th className="px-2 py-2 text-right font-medium">RMD</th>
               <th className="px-2 py-2 text-right font-medium">Events</th>
               <th className="px-2 py-2 text-right font-medium">Spending</th>
               <th className="px-2 py-2 text-right font-medium">Saved</th>
               <th className="px-2 py-2 text-right font-medium">Taken out</th>
+              <th className="px-2 py-2 text-right font-medium">Tax</th>
+              <th className="px-2 py-2 text-right font-medium">To Roth</th>
               <th className="px-2 py-2 text-right font-medium">Growth</th>
               <th className="px-2 py-2 text-right font-medium">End balance</th>
             </tr>
@@ -518,7 +620,10 @@ function YearByYear({ projection }: { projection: Projection }) {
                   <td className="px-2 py-1.5">{ageText(r.ages)}</td>
                   <td className={cell}>{blank(r.pay)}</td>
                   <td className={cell}>{blank(r.socialSecurity)}</td>
-                  <td className={cell}>{blank(r.other)}</td>
+                  <td className={cell} title={r.deferredPaid ? `${wholeMoney(r.deferredPaid)} deferred comp` : undefined}>
+                    {blank(r.other + r.deferredPaid)}
+                  </td>
+                  <td className={cell}>{blank(r.rmd)}</td>
                   <td className={cell}>{blank(r.events)}</td>
                   <td className={cell}>{blank(r.spending)}</td>
                   <td className={cell}>{blank(r.saved + r.contributions)}</td>
@@ -526,6 +631,10 @@ function YearByYear({ projection }: { projection: Projection }) {
                     {blank(taken)}
                     {r.shortfall > 0 && <span className="block text-xs text-rose-700 dark:text-rose-400">{wholeMoney(r.shortfall)} short</span>}
                   </td>
+                  <td className={cell} title={r.tax.state ? `${wholeMoney(r.tax.federal)} federal, ${wholeMoney(r.tax.state)} state` : undefined}>
+                    {blank(r.tax.federal + r.tax.state)}
+                  </td>
+                  <td className={cell}>{blank(r.conversion)}</td>
                   <td className={cell}>{blank(r.growth)}</td>
                   <td className={cx(cell, 'font-medium')}>{wholeMoney(r.total)}</td>
                 </tr>

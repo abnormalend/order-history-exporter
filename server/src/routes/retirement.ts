@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { RetirementService } from '../retirement/service';
 import type { Plan } from '../retirement/project';
+import { STATES } from '../retirement/tax';
 import { HttpError } from '../params';
 import type { AuthedRequest } from '../app';
 
@@ -17,7 +18,7 @@ const person = z
     retireAge: z.number().int().min(30).max(85),
     planToAge: z.number().int().min(60).max(110),
     takeHome: dollars,
-    contributions: z.object({ pre_tax: dollars, roth: dollars, hsa: dollars }),
+    contributions: z.object({ pre_tax: dollars, roth: dollars, hsa: dollars, deferred: dollars.optional() }),
     ssAtFullAge: z.number().min(0).max(20000),
     ssClaimAge: z.number().min(62, 'Social Security starts at 62 at the earliest.').max(70, 'Waiting past 70 adds nothing.'),
   })
@@ -37,6 +38,7 @@ const planSchema = z.object({
         endAge: z.number().int().min(0).max(120).nullable(),
         yearly: z.number().min(0).max(1e8),
         inflationAdjusted: z.boolean(),
+        taxable: z.boolean().optional(),
       })
     )
     .max(30),
@@ -50,6 +52,17 @@ const planSchema = z.object({
       })
     )
     .max(50),
+  taxes: z
+    .object({
+      enabled: z.boolean(),
+      state: z.enum(Object.keys(STATES) as [string, ...string[]]),
+      stateRate: z.number().min(0).max(0.15).optional(),
+      stateDeduction: dollars.optional(),
+      rothConversionsTo: z.union([z.literal(0.12), z.literal(0.22), z.literal(0.24), z.literal(0.32)]).nullable(),
+      withdrawalOrder: z.enum(['standard', 'pretax_first']),
+      deferredYears: z.number().int().min(1).max(15),
+    })
+    .optional(),
 });
 
 function parse(body: unknown): Plan {
