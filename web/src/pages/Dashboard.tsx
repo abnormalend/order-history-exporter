@@ -5,8 +5,9 @@ import type { InOutMonth, MonthPart, Row } from '../charts';
 import { FilterBar, useFilters } from '../filters';
 import type { Meta } from '../filters';
 import { when } from '../bank';
-import { useBusiness } from '../business';
+import { businessQuery, useBusiness } from '../business';
 import { CashFlowOverview } from '../cashflow';
+import { UnitIncomeCard } from '../unitIncome';
 import type { Account, SimplefinStatus } from '../bank';
 import { money, whole } from '../format';
 import { Banner, Card, Empty, Loading, PageHeader, Stat, TD, TH, TR } from '../ui';
@@ -31,12 +32,22 @@ export function Dashboard({ meta }: { meta: Meta | null }) {
   const openMonth = (row: Row) => {
     const [year, month] = row.label.split('-').map(Number);
     const last = new Date(year, month, 0).getDate();
-    navigate(linkTo('/orders', { preset: 'custom', from: `${row.label}-01`, to: `${row.label}-${String(last).padStart(2, '0')}` }));
+    navigate(
+      linkTo('/orders', {
+        preset: 'custom',
+        from: `${row.label}-01`,
+        to: `${row.label}-${String(last).padStart(2, '0')}`,
+      }),
+    );
   };
   // Personal spending is left out of the dashboard.
   const report = useApi<any>(`/api/report?${query()}&status=notpersonal`);
   const status = useApi<any>('/api/status');
   const data = report.data;
+  // A business with no store orders at all (a long-term rental, say) skips the store-order
+  // figures and charts, which would only be empty.
+  const ever = useApi<any>(business !== null ? `/api/report?status=notpersonal${businessQuery(business)}` : null);
+  const noOrders = business !== null && ever.data?.totals?.orders === 0;
   const totals = data?.totals;
 
   const caveats: string[] = [];
@@ -55,12 +66,13 @@ export function Dashboard({ meta }: { meta: Meta | null }) {
         }
       />
       <CashFlowOverview />
+      <UnitIncomeCard />
       <h2 className="mb-3 mt-8 text-lg font-semibold tracking-tight">Spending</h2>
       <FilterBar meta={meta} />
       <BankSummary range={range()} />
       {report.error && <Banner>{report.error.message}</Banner>}
       {!data && report.loading && <Loading />}
-      {data && (
+      {data && !noOrders && (
         <>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <Stat label="Total spent" value={money(totals.spend ?? 0)} />
@@ -146,36 +158,47 @@ export function Dashboard({ meta }: { meta: Meta | null }) {
         </>
       )}
 
-      <Card title="Sync status" className="mt-5" padded={false} actions={<Link to="/settings" className="text-sm text-emerald-700 hover:underline dark:text-emerald-400">Connect the extension</Link>}>
-        {status.data?.stores?.length ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr>
-                  <th className={TH}>Store</th>
-                  <th className={`${TH} text-right`}>Orders</th>
-                  <th className={TH}>Fully read</th>
-                  <th className={`${TH} text-right`}>Details missing</th>
-                  <th className={TH}>Last sync</th>
-                </tr>
-              </thead>
-              <tbody>
-                {status.data.stores.map((s: any) => (
-                  <tr key={s.store} className={TR}>
-                    <td className={`${TD} whitespace-nowrap`}>{s.name}</td>
-                    <td className={`${TD} text-right tabular-nums`}>{whole(s.orders)}</td>
-                    <td className={TD}>{s.coverage.length ? s.coverage.map((c: any) => `${c.from || 'Beginning'} to ${c.to}`).join('; ') : 'Not yet'}</td>
-                    <td className={`${TD} text-right tabular-nums`}>{whole(s.missingDetails)}</td>
-                    <td className={`${TD} whitespace-nowrap`}>{s.lastRun.finished_at ? new Date(s.lastRun.finished_at).toLocaleString() : 'Never'}</td>
+      {!noOrders && (
+        <Card
+          title="Sync status"
+          className="mt-5"
+          padded={false}
+          actions={
+            <Link to="/settings" className="text-sm text-emerald-700 hover:underline dark:text-emerald-400">
+              Connect the extension
+            </Link>
+          }
+        >
+          {status.data?.stores?.length ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr>
+                    <th className={TH}>Store</th>
+                    <th className={`${TH} text-right`}>Orders</th>
+                    <th className={TH}>Fully read</th>
+                    <th className={`${TH} text-right`}>Details missing</th>
+                    <th className={TH}>Last sync</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <Empty>Nothing synced yet. Run the Chrome extension to fill in your orders.</Empty>
-        )}
-      </Card>
+                </thead>
+                <tbody>
+                  {status.data.stores.map((s: any) => (
+                    <tr key={s.store} className={TR}>
+                      <td className={`${TD} whitespace-nowrap`}>{s.name}</td>
+                      <td className={`${TD} text-right tabular-nums`}>{whole(s.orders)}</td>
+                      <td className={TD}>{s.coverage.length ? s.coverage.map((c: any) => `${c.from || 'Beginning'} to ${c.to}`).join('; ') : 'Not yet'}</td>
+                      <td className={`${TD} text-right tabular-nums`}>{whole(s.missingDetails)}</td>
+                      <td className={`${TD} whitespace-nowrap`}>{s.lastRun.finished_at ? new Date(s.lastRun.finished_at).toLocaleString() : 'Never'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty>Nothing synced yet. Run the Chrome extension to fill in your orders.</Empty>
+          )}
+        </Card>
+      )}
     </>
   );
 }
@@ -183,7 +206,11 @@ export function Dashboard({ meta }: { meta: Meta | null }) {
 // Bank and card totals for the chosen period, and what needs reviewing.
 function BankSummary({ range }: { range: { from: string; to: string; years?: string[] } }) {
   const { business, current } = useBusiness();
-  const accounts = useApi<{ accounts: Account[]; simplefin: SimplefinStatus | null; reviewCount: number }>('/api/bank/accounts');
+  const accounts = useApi<{
+    accounts: Account[];
+    simplefin: SimplefinStatus | null;
+    reviewCount: number;
+  }>('/api/bank/accounts');
   const period = new URLSearchParams();
   if (range.from) period.set('from', range.from);
   if (range.to) period.set('to', range.to);
@@ -194,9 +221,12 @@ function BankSummary({ range }: { range: { from: string; to: string; years?: str
   // What needs review in the business being looked at (all of them when none is chosen), as the Review page shows it.
   const review = useApi<{ total: number }>(`/api/bank/transactions?review=1&kind=normal&preset=all&limit=1${business ? `&entity=${business}` : ''}`);
   const reviewCount = review.data?.total ?? 0;
-  const spending = useApi<{ byCategory: { key: string; label: string; spend: number }[]; byEntity: { key: string; label: string; spend: number }[]; byMonth: InOutMonth[]; byStore: { key: string; label: string; spend: number }[] }>(
-    `/api/bank/spending?${period}`
-  );
+  const spending = useApi<{
+    byCategory: { key: string; label: string; spend: number }[];
+    byEntity: { key: string; label: string; spend: number }[];
+    byMonth: InOutMonth[];
+    byStore: { key: string; label: string; spend: number }[];
+  }>(`/api/bank/spending?${period}`);
   const navigate = useNavigate();
   // A month's transactions, keeping the dashboard's other filters: all of them, its
   // spending, or its income from one source.
@@ -300,7 +330,11 @@ function BankSummary({ range }: { range: { from: string; to: string; years?: str
       </div>
       {sf?.errors.length ? (
         <p className="mt-3 text-xs text-amber-700 dark:text-amber-400">
-          SimpleFIN reported a problem on its last check. <Link to="/accounts" className="underline">See Accounts</Link>.
+          SimpleFIN reported a problem on its last check.{' '}
+          <Link to="/accounts" className="underline">
+            See Accounts
+          </Link>
+          .
         </p>
       ) : null}
     </Card>

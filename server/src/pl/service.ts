@@ -277,6 +277,67 @@ export function plService({ db, bank, correlate }: { db: DatabaseSync; bank: Ban
     };
   }
 
+  // Income per unit month by month, the same thirteen months as the cash flow: each
+  // stay's payout spread over its nights, and rent received on mid-term leases. A
+  // lease tied to a property counts toward that unit; one that isn't, toward its own.
+  function unitIncome(entity: number | null = null) {
+    const current = today().slice(0, 7);
+    const months: string[] = [];
+    for (let i = 12; i >= 0; i--) months.push(monthsBefore(current, i));
+    const first = `${months[0]}-01`;
+    const units = new Map<string, { key: string; name: string; stays: Map<string, number>; rent: Map<string, number> }>();
+    const unit = (key: string, name: string) => {
+      const u = units.get(key) ?? { key, name, stays: new Map<string, number>(), rent: new Map<string, number>() };
+      units.set(key, u);
+      return u;
+    };
+    const stays = db
+      .prepare(
+        `SELECT s.arrival, s.departure, COALESCE(s.expected_override, s.payout) AS payout, p.id AS property, p.name
+         FROM stays s JOIN stay_properties p ON p.id = s.property_id
+         WHERE s.status = 'accepted' AND s.departure > ? ${entity ? 'AND p.entity_id = ?' : ''}`
+      )
+      .all(first, ...(entity ? [entity] : [])) as Row[];
+    const DAY = 86400000;
+    for (const s of stays) {
+      const start = Date.parse(`${s.arrival}T00:00:00Z`);
+      const nights = Math.max(1, Math.round((Date.parse(`${s.departure}T00:00:00Z`) - start) / DAY));
+      const u = unit(s.property as string, s.name as string);
+      const perNight = (Number(s.payout) || 0) / nights;
+      for (let n = 0; n < nights; n++) {
+        const month = new Date(start + n * DAY).toISOString().slice(0, 7);
+        u.stays.set(month, (u.stays.get(month) ?? 0) + perNight);
+      }
+    }
+    const rent = db
+      .prepare(
+        `SELECT substr(pay.paid_on, 1, 7) AS month, SUM(pay.amount) AS amount, l.unit, l.property_id, sp.name
+         FROM lease_payments pay JOIN leases l ON l.id = pay.lease_id LEFT JOIN stay_properties sp ON sp.id = l.property_id
+         WHERE pay.purpose IN ('rent', 'applied') AND pay.paid_on >= ? ${entity ? 'AND l.entity_id = ?' : ''}
+         GROUP BY 1, 3, 4`
+      )
+      .all(first, ...(entity ? [entity] : [])) as Row[];
+    for (const r of rent) {
+      const u = r.property_id && r.name ? unit(r.property_id as string, r.name as string) : unit(`lease:${r.unit}`, r.unit as string);
+      u.rent.set(r.month as string, (u.rent.get(r.month as string) ?? 0) + Number(r.amount));
+    }
+    const list = [...units.values()]
+      .map((u) => {
+        const rows = months.map((month) => {
+          const s = cents(u.stays.get(month) ?? 0);
+          const r = cents(u.rent.get(month) ?? 0);
+          return { month, stays: s, rent: r, total: cents(s + r) };
+        });
+        // The last twelve whole months, as the cash flow's figures are.
+        const whole = rows.slice(0, -1);
+        const total = cents(whole.reduce((t, m) => t + m.total, 0));
+        return { key: u.key, name: u.name, months: rows, total, average: cents(total / whole.length) };
+      })
+      .filter((u) => u.months.some((m) => m.total !== 0))
+      .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, undefined, { numeric: true }));
+    return { months, units: list };
+  }
+
   // Net operating income over a year, from the days actually covered, and as a share
   // of the money invested.
   function returns(noi: number, from: string, to: string, entity: number | null = null) {
@@ -373,7 +434,7 @@ export function plService({ db, bank, correlate }: { db: DatabaseSync; bank: Ban
     };
   }
 
-  return { settings, saveSettings, report, cashFlow, saveMarketValue };
+  return { settings, saveSettings, report, cashFlow, unitIncome, saveMarketValue };
 }
 
 export type PlService = ReturnType<typeof plService>;

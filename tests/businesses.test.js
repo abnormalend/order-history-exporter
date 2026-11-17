@@ -259,3 +259,41 @@ test('a tax return as filed sits beside Business Hub for the same categories', a
   await assert.rejects(post('/api/returns', { entityId: 9999, year: '2026', lines: [] }), /not found/);
   await assert.rejects(post('/api/returns', { entityId: str, year: '26', lines: [] }), /A year looks like/);
 });
+
+test('income per unit: stay payouts spread over their nights, and lease rent by the unit', async () => {
+  const day = (d) => d.toISOString().slice(0, 10);
+  const now = new Date();
+  const lastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const before = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 2, 1));
+  const m1 = day(lastMonth).slice(0, 7);
+  const m2 = day(before).slice(0, 7);
+  const stamp = new Date().toISOString();
+  const raw = db.raw;
+  raw.prepare('INSERT INTO stay_properties (id, name, synced_at, entity_id) VALUES (?, ?, ?, ?)').run('prop-green', 'Green', stamp, str);
+  raw.prepare('INSERT INTO stay_properties (id, name, synced_at, entity_id) VALUES (?, ?, ?, ?)').run('prop-cabin', 'Cabin', stamp, str);
+  raw.prepare('INSERT INTO stay_properties (id, name, synced_at, entity_id) VALUES (?, ?, ?, ?)').run('prop-other', 'Elsewhere', stamp, ltr);
+  const stay = (id, property, arrival, departure, payout, status = 'accepted') =>
+    raw
+      .prepare('INSERT INTO stays (id, platform, property_id, status, arrival, departure, nights, payout, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, 'airbnb', property, status, arrival, departure, 0, payout, stamp);
+  // Four nights across the turn of the month: two in each.
+  stay('s1', 'prop-green', day(new Date(lastMonth.getTime() - 2 * 86400000)), day(new Date(lastMonth.getTime() + 2 * 86400000)), 800);
+  stay('s2', 'prop-cabin', `${m1}-10`, `${m1}-13`, 900);
+  stay('s3', 'prop-cabin', `${m1}-20`, `${m1}-22`, 500, 'cancelled');
+  stay('s4', 'prop-other', `${m1}-05`, `${m1}-07`, 300);
+  const { lease } = await post('/api/leases', { unit: 'Green', tenant: 'Sam Example', start: `${m2}-01`, entityId: str, propertyId: 'prop-green' });
+  await post(`/api/leases/${lease.id}/payments`, { date: `${m1}-03`, amount: 1500, purpose: 'rent' });
+
+  const { months, units } = await get(`/api/pl/units?entity=${str}`);
+  assert.equal(months.length, 13);
+  assert.deepEqual(units.map((u) => u.name), ['Green', 'Cabin'], "only this business's units, the most income first");
+  const at = (u, month) => units.find((x) => x.name === u).months.find((m) => m.month === month);
+  assert.deepEqual(at('Green', m2), { month: m2, stays: 400, rent: 0, total: 400 });
+  assert.deepEqual(at('Green', m1), { month: m1, stays: 400, rent: 1500, total: 1900 });
+  assert.deepEqual(at('Cabin', m1), { month: m1, stays: 900, rent: 0, total: 900 }, 'a cancelled stay counts for nothing');
+  assert.equal(units[0].total, 2300);
+  assert.equal(units[0].average, Math.round((2300 / 12) * 100) / 100);
+  const all = (await get('/api/pl/units')).units.map((u) => u.name);
+  assert.ok(['Cabin', 'Elsewhere', 'Green'].every((n) => all.includes(n)), 'every business when none is chosen');
+  assert.equal((await call('/api/pl/units?entity=x')).status, 400);
+});

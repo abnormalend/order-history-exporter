@@ -33,6 +33,12 @@ export function plRoutes(app: FastifyInstance, pl: PlService) {
     return pl.cashFlow(business ? Number(business) : null);
   });
 
+  app.get('/api/pl/units', async (request) => {
+    const business = queryOf(request.query).get('entity');
+    if (business && !/^\d+$/.test(business)) throw new HttpError(400, 'Unknown business.');
+    return pl.unitIncome(business ? Number(business) : null);
+  });
+
   app.post('/api/pl/market-value', async (request) => {
     const result = z.object({ entityId: z.number().int().positive(), value: z.number().min(0).max(1e10).nullable() }).safeParse(request.body);
     if (!result.success) throw new HttpError(400, result.error.issues[0]?.message || 'Invalid request.');
