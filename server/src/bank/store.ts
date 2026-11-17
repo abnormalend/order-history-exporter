@@ -216,11 +216,14 @@ export function createBankStore(db: DatabaseSync) {
     currency?: string;
     simplefinId?: string | null;
     fileKey?: string | null;
+    // What kind of investment account it is, when it is one.
+    investType?: string | null;
+    holder?: string | null;
   }): number {
     const result = db
       .prepare(
-        `INSERT INTO bank_accounts (name, institution, kind, owner, last4, currency, simplefin_id, file_key, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO bank_accounts (name, institution, kind, owner, last4, currency, simplefin_id, file_key, invest_type, holder, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         input.name,
@@ -231,6 +234,8 @@ export function createBankStore(db: DatabaseSync) {
         input.currency ?? 'USD',
         input.simplefinId ?? null,
         input.fileKey ?? null,
+        input.investType ?? null,
+        input.holder ?? null,
         now()
       );
     return Number(result.lastInsertRowid);
@@ -968,7 +973,9 @@ export function createBankStore(db: DatabaseSync) {
       // Needs a decision: no business/personal status, or no category (store charges
       // still waiting for their online order get theirs from it later, so they only need
       // a status; ones bought in the store, or with a receipt, need a category too).
-      clauses.push(`t.kind = 'normal' AND (t.status IS NULL OR (t.category IS NULL AND NOT (COALESCE(t.payee, '') IN (${[...STORE_PAYEES].map(() => '?').join(', ')}) AND ${AWAITS_ORDER})))`);
+      // Money moving inside an investment account (dividends reinvested, contributions,
+      // trades) is the account growing, not spending, so it never needs one.
+      clauses.push(`t.kind = 'normal' AND t.account_id NOT IN (SELECT id FROM bank_accounts WHERE kind = 'investment') AND (t.status IS NULL OR (t.category IS NULL AND NOT (COALESCE(t.payee, '') IN (${[...STORE_PAYEES].map(() => '?').join(', ')}) AND ${AWAITS_ORDER})))`);
       params.push(...STORE_PAYEES);
     }
     return { sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };

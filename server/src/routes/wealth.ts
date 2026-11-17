@@ -4,6 +4,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { WealthService } from '../wealth/service';
 import { HOLDERS } from '../wealth/service';
+import { ASSET_CLASSES } from '../wealth/positions';
+import type { AssetClass } from '../wealth/positions';
 import { HttpError, queryOf } from '../params';
 import type { AuthedRequest } from '../app';
 
@@ -59,6 +61,33 @@ export function wealthRoutes(app: FastifyInstance, wealth: WealthService) {
     wealth.setBalance(id, body.balance, body.day);
     audit(request, 'wealth.balance', { id, ...body });
     return { ok: true };
+  });
+
+  app.get('/api/wealth/accounts/:id/holdings', async (request) => wealth.holdings(idOf(request.params)));
+
+  // A brokerage positions file: read first, then saved to the accounts chosen.
+  const positionsFile = z.object({ fileName: z.string().max(200).optional(), text: z.string().min(1, 'The file is empty.').max(2_000_000, 'That file is too big for a positions download.') });
+  app.post('/api/wealth/positions/inspect', async (request) => wealth.inspectPositions(parse(positionsFile, request.body).text));
+
+  app.post('/api/wealth/positions', async (request) => {
+    const body = parse(positionsFile.extend({ assign: z.record(z.string().max(10), z.union([z.number().int().positive(), z.literal('new'), z.null()])) }), request.body);
+    const result = wealth.savePositions(body.text, body.assign);
+    audit(request, 'wealth.positions', { fileName: body.fileName ?? null, assign: body.assign, ...result });
+    return result;
+  });
+
+  app.post('/api/wealth/classes', async (request) => {
+    const body = parse(z.object({ key: z.string().trim().min(1).max(210), assetClass: z.enum(Object.keys(ASSET_CLASSES) as [AssetClass, ...AssetClass[]]).nullable() }), request.body);
+    wealth.setClass(body.key, body.assetClass);
+    audit(request, 'wealth.class', body);
+    return { ok: true };
+  });
+
+  app.post('/api/wealth/suggestions', async (request) => {
+    const body = parse(z.object({ ids: z.array(z.number().int().positive()).min(1).max(200) }), request.body);
+    const changed = wealth.applySuggestions(body.ids);
+    audit(request, 'wealth.suggestions', { ...body, changed });
+    return { changed };
   });
 
   app.post('/api/wealth/accounts/:id/delete', async (request) => {

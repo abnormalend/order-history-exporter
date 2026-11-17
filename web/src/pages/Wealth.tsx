@@ -3,7 +3,8 @@
 import { useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, Pencil, Plus, Trash2 } from 'lucide-react';
+import { AlertTriangle, Pencil, Plus, Trash2, Upload } from 'lucide-react';
+import { Allocation, Checks, Holdings, ImportPositions, Suggestions } from './WealthHoldings';
 import { post, useApi } from '../api';
 import { BankBadge } from '../banks';
 import { wholeMoney } from '../format';
@@ -25,6 +26,9 @@ interface WealthAccount {
   source: 'simplefin' | 'manual' | 'file';
   stale: boolean;
   removable: boolean;
+  positions: { count: number; total: number; asOf: string } | null;
+  suggestedType: string | null;
+  suggestedHolder: Holder | null;
 }
 interface WealthData {
   accounts: WealthAccount[];
@@ -34,6 +38,12 @@ interface WealthData {
   byHolder: { holder: Holder | null; amount: number }[];
   history: { day: string; netWorth: number; invested: number }[];
   types: { key: string; label: string; treatment: string }[];
+  allocation: { key: string; label: string; amount: number; share: number }[];
+  topHoldings: { symbol: string | null; description: string; value: number; share: number; assetClass: string; accounts: string[] }[];
+  notBrokenDown: { id: number; name: string; balance: number; countedAs: string | null }[];
+  checks: { key: string; title: string; detail: string; accountIds: number[] }[];
+  investedTotal: number;
+  classes: { key: string; label: string }[];
 }
 
 const HOLDER_LABELS: Record<Holder, string> = { me: 'You', spouse: 'Spouse', joint: 'Joint' };
@@ -50,10 +60,14 @@ const TREATMENT: Record<string, { label: string; colour: string; hint: string }>
 const SOURCE_LABELS = { simplefin: 'SimpleFIN', manual: 'Typed in', file: 'From files' };
 const dayLabel = (day: string | null) => (day ? new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'no balance');
 
+export type { WealthAccount, WealthData, Holder };
+export { HOLDER_LABELS };
+
 export function Wealth() {
   const [business, setBusiness] = useState(false);
   const { data, error, reload } = useApi<WealthData>(`/api/wealth${business ? '?business=1' : ''}`);
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   if (error) return <Banner>{error.message}</Banner>;
   if (!data) return <Loading />;
@@ -74,6 +88,10 @@ export function Wealth() {
                 Include business accounts
               </label>
             )}
+            <Button onClick={() => setImporting(true)}>
+              <Upload className="size-4" aria-hidden />
+              Import positions
+            </Button>
             <Button variant="primary" onClick={() => setAdding(true)}>
               <Plus className="size-4" aria-hidden />
               Add an account
@@ -111,6 +129,20 @@ export function Wealth() {
         </Card>
       </div>
 
+      <Suggestions accounts={data.accounts} typeLabel={typeLabel} onChange={reload} />
+      {importing && <ImportPositions onClose={() => setImporting(false)} onSaved={reload} />}
+
+      {data.allocation.length > 0 && (
+        <div className="mb-5 grid gap-5 lg:grid-cols-[3fr_2fr]">
+          <Card title="What the invested money is in">
+            <Allocation data={data} />
+          </Card>
+          <Card title="Worth a look">
+            <Checks checks={data.checks} />
+          </Card>
+        </div>
+      )}
+
       {adding && <AddAccount types={data.types} onClose={() => setAdding(false)} onSaved={reload} />}
 
       <Card title="Investment and retirement accounts" className="mb-5" padded={false}>
@@ -123,7 +155,7 @@ export function Wealth() {
             as Other. Add a pension, deferred compensation or any account nothing can import with <strong>Add an account</strong>.
           </p>
         ) : (
-          <AccountList accounts={investments} types={data.types} typeLabel={typeLabel} onChange={reload} />
+          <AccountList accounts={investments} types={data.types} typeLabel={typeLabel} onChange={reload} classes={data.classes} />
         )}
       </Card>
 
@@ -261,8 +293,9 @@ function Treatments({ rows }: { rows: WealthData['byTreatment'] }) {
   );
 }
 
-function AccountList({ accounts, types, typeLabel, onChange }: { accounts: WealthAccount[]; types: WealthData['types']; typeLabel: (k: string | null) => string; onChange: () => void }) {
+function AccountList({ accounts, types, typeLabel, onChange, classes }: { accounts: WealthAccount[]; types: WealthData['types']; typeLabel: (k: string | null) => string; onChange: () => void; classes?: WealthData['classes'] }) {
   const [editing, setEditing] = useState<number | null>(null);
+  const [open, setOpen] = useState<number | null>(null);
   if (!accounts.length) return <p className="p-4 text-sm text-slate-500">None.</p>;
   return (
     <ul className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -282,6 +315,11 @@ function AccountList({ accounts, types, typeLabel, onChange }: { accounts: Wealt
                 <span>
                   · {SOURCE_LABELS[a.source]}, {dayLabel(a.balanceDate)}
                 </span>
+                {a.positions && classes && (
+                  <button type="button" className="text-emerald-700 underline dark:text-emerald-400" aria-expanded={open === a.id} onClick={() => setOpen(open === a.id ? null : a.id)}>
+                    · {a.positions.count} {a.positions.count === 1 ? 'holding' : 'holdings'} as of {dayLabel(a.positions.asOf)}
+                  </button>
+                )}
                 {a.stale && (
                   <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400">
                     <AlertTriangle className="size-3" aria-hidden />
@@ -301,6 +339,7 @@ function AccountList({ accounts, types, typeLabel, onChange }: { accounts: Wealt
               <Pencil className="size-4" aria-hidden />
             </button>
           </div>
+          {open === a.id && classes && <Holdings accountId={a.id} classes={classes} onChange={onChange} />}
           {editing === a.id && <EditAccount account={a} types={types} onDone={() => setEditing(null)} onChange={onChange} />}
         </li>
       ))}

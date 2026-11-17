@@ -6,6 +6,7 @@
 import type { SecretBox } from '../secrets';
 import type { BankStore } from './store';
 import type { AccountKind, IncomingTransaction } from './types';
+import { guessHolder, guessInvestType } from '../wealth/positions';
 
 type Fetch = typeof fetch;
 const MAX_RANGE_DAYS = 90;
@@ -138,10 +139,17 @@ export function simplefinService(store: BankStore, box: SecretBox, fetchImpl: Fe
         if (only && !only.has(raw.id)) continue;
         let id = store.accountForSimplefin(raw.id);
         if (!id) {
+          const name = String(raw.name || 'Account').slice(0, 100);
+          const institution = ((raw.conn_id && institutions.get(raw.conn_id)) || raw.org?.name || null)?.slice(0, 100) ?? null;
+          // A brokerage or retirement account says which kind by its name or where it is.
+          const kind = guessKind(name);
+          const investType = kind === 'credit' || kind === 'loan' ? null : guessInvestType(name, institution);
           id = store.createAccount({
-            name: String(raw.name || 'Account').slice(0, 100),
-            institution: ((raw.conn_id && institutions.get(raw.conn_id)) || raw.org?.name || null)?.slice(0, 100) ?? null,
-            kind: guessKind(raw.name || ''),
+            name,
+            institution,
+            kind: investType ? 'investment' : kind,
+            investType,
+            holder: investType ? guessHolder(name) : null,
             owner: 'mixed',
             currency: /^[A-Z]{3}$/.test(raw.currency || '') ? raw.currency : 'USD',
             simplefinId: raw.id,

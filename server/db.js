@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 30;
+const SCHEMA_VERSION = 31;
 
 // Links from Amazon's top bar, side cart and footer (its own card ads among them), which
 // a details page read too early can mistake for the items bought.
@@ -626,6 +626,31 @@ const SCHEMA_V28 = `
   UPDATE categories SET expense_class = 'income' WHERE name IN ('Rental Income', 'Other Income');
 `;
 
+// What each investment account holds, read from the brokerage positions files: the
+// latest file per account replaces the one before. Asset classes chosen by hand for a
+// security (by symbol, or by name when it has none) win over the guess.
+const SCHEMA_V31 = `
+  CREATE TABLE holdings (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES bank_accounts (id) ON DELETE CASCADE,
+    as_of TEXT NOT NULL,
+    symbol TEXT,
+    description TEXT NOT NULL,
+    quantity REAL,
+    price REAL,
+    value REAL NOT NULL,
+    cost_basis REAL,
+    hint TEXT,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX holdings_account ON holdings (account_id);
+  CREATE TABLE security_classes (
+    key TEXT PRIMARY KEY,
+    asset_class TEXT NOT NULL
+  );
+`;
+
 // Investment and retirement accounts: what kind each is (which decides how it's taxed
 // when spent) and whose it is in the household. Every balance is kept by day, for net
 // worth over time; balances already known start the history.
@@ -957,6 +982,7 @@ function migrate(db, file) {
                WHERE (store, order_id) IN (${marked})`);
       db.exec(`DELETE FROM items WHERE (store, order_id) IN (${marked})`);
     }
+    if (version < 31) db.exec(SCHEMA_V31);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
