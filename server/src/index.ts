@@ -24,6 +24,12 @@ async function main() {
     tls: config.tls,
     secrets: fileSecretBox(config.dataDir),
     dataDir: config.dataDir,
+    access: {
+      tailnetHost: config.publicHost || null,
+      lanReady: config.host !== '127.0.0.1' && config.host !== 'localhost' && config.host !== '::1',
+      // Tailscale's own 100.64–127 address isn't a home-network one.
+      lanUrls: [...addresses.filter((a) => !/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a)), ...config.lanHosts].map((h) => (h.includes(':') ? `${config.tls ? 'https' : 'http'}://${h}` : `${config.tls ? 'https' : 'http'}://${h}:${config.port}`)),
+    },
   });
   // Receipts waiting from before a restart.
   app.receipts.kick();

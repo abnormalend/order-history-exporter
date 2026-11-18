@@ -61,6 +61,14 @@ pct exec CTID -- bash /opt/expense-hub/deploy/proxmox/enable-tailscale.sh
 
 Install the Tailscale app on your phone and computers, and open the `https://` address it prints. Business Hub isn't reachable from the internet.
 
+**Home-network access (optional).** To reach it without Tailscale too, for example over another VPN into your home network, let the server listen on the network once. Add any local DNS names you've pointed at the container:
+
+```bash
+pct exec CTID -- bash /opt/expense-hub/deploy/proxmox/enable-lan.sh hub.home
+```
+
+That only makes it possible. Home-network access stays off until you turn it on under **Settings > Access**, for 1, 7 or 30 days or until you turn it off, and the same card turns Tailscale off and on. One way in always stays open: Tailscale can only go off while home-network access is on with no end date. If you lock yourself out anyway, `enable-lan.sh --reset-switches` turns Tailscale back on, and `enable-lan.sh --off` stops listening on the network. Home-network connections are plain HTTP on port 8787, so use them only at home or through your VPN, and never forward the port from your router.
+
 To update later:
 
 ```bash
@@ -252,6 +260,7 @@ On Linux without Proxmox, follow `deploy/proxmox/setup-in-container.sh` by hand:
 | `OHE_HOST` | `127.0.0.1` (`0.0.0.0` with `--network`) | Address to listen on |
 | `OHE_DATA_DIR` | `server/data` | Where the database and token are kept |
 | `OHE_PUBLIC_HOST` | none | Extra address to accept requests for, such as `orders.example.com` |
+| `OHE_LAN_HOSTS` | none | Local names to accept on the network, comma separated, such as `hub.home` |
 | `OHE_TLS_CERT`, `OHE_TLS_KEY` | none | Certificate and key files, to serve HTTPS |
 | `OHE_ALLOW_PUBLIC_CLIENTS` | off | Set to `1` to accept connections from public addresses |
 

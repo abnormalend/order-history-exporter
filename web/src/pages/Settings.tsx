@@ -10,6 +10,7 @@ import { Banner, Button, Card, Confirm, Field, Input, PageHeader, Select } from 
 import type { Meta } from '../filters';
 import type { SignedInUser } from './SignIn';
 import { FamilyCard } from '../family';
+import { AccessCard } from '../access';
 
 function PasswordCard({ onSignedOut }: { onSignedOut: () => void }) {
   const [form, setForm] = useState({ current: '', next: '', confirm: '' });
@@ -655,6 +656,7 @@ export function Settings({ user, meta, onUserChange, onSignedOut, onMetaChange }
       <PageHeader title="Settings" description={`Signed in as ${user.username}.`} />
       <div className="grid gap-5 lg:grid-cols-2">
         <TwoFactorCard user={user} onChange={onUserChange} />
+        <AccessCard />
         <ExtensionCard />
         <ReceiptReaderCard />
         <HospitableCard />

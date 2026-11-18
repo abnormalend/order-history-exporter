@@ -7,6 +7,9 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import { createAuthStore } from './auth';
+import { accessService } from './access';
+import type { AccessSetup } from './access';
+import { accessRoutes } from './routes/access';
 import { simplefinService } from './bank/simplefin';
 import type { SimplefinService } from './bank/simplefin';
 import { createBankStore } from './bank/store';
@@ -76,6 +79,8 @@ export interface AppOptions {
   // For tests, in place of Claude.
   receiptReader?: ReceiptReader;
   itemSorter?: ItemSorter;
+  // Tailscale and home-network switches. Without it, every way in stays open.
+  access?: AccessSetup;
 }
 
 declare module 'fastify' {
@@ -117,6 +122,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
       ? options.allowedHosts
       : (host: string) => (options.allowedHosts as string[]).includes(host);
   const store = createAuthStore(db.raw);
+  const access = accessService(db.raw, options.access ?? { tailnetHost: null, lanReady: false, lanUrls: [] });
 
   // Only a proxy on this same machine (such as Tailscale's) is trusted to say who the client is.
   const app = (
@@ -131,13 +137,16 @@ export function buildApp(options: AppOptions): FastifyInstance {
     store.audit(user ? user.username : 'extension', action, detail);
   });
 
-  app.addHook('onRequest', async (request) => {
+  app.addHook('onRequest', async (request, reply) => {
     if (!allowAnyClient && !isPrivateAddress(request.ip)) {
       throw new HttpError(403, 'This server only accepts connections from private networks.');
     }
     if (!hostAllowed(String(request.host || '').toLowerCase())) {
       throw new HttpError(403, 'This server is not configured for that address. See OHE_PUBLIC_HOST in the README.');
     }
+    const shut = access.refusal(access.way(request.socket.remoteAddress, String(request.host || '')));
+    if (shut && !request.url.startsWith('/api/')) return reply.code(403).type('text/plain; charset=utf-8').send(`Business Hub\n\n${shut}\n`);
+    if (shut) throw new HttpError(403, shut);
   });
 
   app.addHook('onSend', async (request, reply, payload) => {
@@ -247,6 +256,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   retirementRoutes(app, retirementService({ bank, wealth, personal }));
   returnsRoutes(app, returnsService({ db: db.raw, pl }), (id) => correlate.entities().some((e) => e.id === id));
   authRoutes(app, store, tokens);
+  accessRoutes(app, access);
 
   const webRoot = options.webRoot;
   const hasWeb = Boolean(webRoot && fs.existsSync(path.join(webRoot, 'index.html')));

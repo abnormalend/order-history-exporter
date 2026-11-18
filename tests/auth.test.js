@@ -192,3 +192,86 @@ test('backups are consistent copies, and only the newest are kept', async () => 
     await s.close();
   }
 });
+
+test('local names from OHE_LAN_HOSTS are accepted beside the tailnet name', () => {
+  const { allowedHostsFor, loadConfig } = require('../server/dist/config');
+  const config = loadConfig(['node', 'index.js'], { OHE_NETWORK: '1', OHE_PUBLIC_HOST: 'hub.example.ts.net', OHE_LAN_HOSTS: 'Hub.Home, books.lan:9000' });
+  assert.equal(config.host, '0.0.0.0');
+  assert.deepEqual(config.lanHosts, ['hub.home', 'books.lan:9000']);
+  const hosts = allowedHostsFor(config, ['10.0.0.5']);
+  for (const host of ['10.0.0.5:8787', 'hub.home:8787', 'hub.home', 'books.lan:9000', 'hub.example.ts.net']) assert.ok(hosts.includes(host), host);
+  assert.ok(!hosts.includes('evil.example:8787'));
+  assert.deepEqual(loadConfig(['node', 'index.js'], {}).lanHosts, [], 'none unless set');
+});
+
+test('access switches: Tailscale only by default, the home network when turned on, and never both off', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ohe-access-'));
+  const db = openDatabase(path.join(dir, 'orders.db'));
+  const tailnet = 'hub.example.ts.net';
+  const app = buildApp({ db, tokens: { get: () => 'first-token', rotate: () => 'x' }, allowedHosts: () => true, access: { tailnetHost: tailnet, lanReady: true, lanUrls: ['http://10.0.0.5:8787'] } });
+  let cookie = '';
+  // Tailscale's proxy runs on the same machine; the home network comes from another one.
+  const ways = { tailscale: { remoteAddress: '127.0.0.1', host: tailnet }, lan: { remoteAddress: '10.0.0.20', host: '10.0.0.5:8787' }, spoof: { remoteAddress: '10.0.0.20', host: tailnet } };
+  const send = async (way, url, payload) => {
+    const r = await app.inject({
+      method: payload === undefined ? 'GET' : 'POST',
+      url,
+      remoteAddress: ways[way].remoteAddress,
+      headers: { host: ways[way].host, 'x-requested-with': 'expense-hub', ...(cookie ? { cookie } : {}) },
+      ...(payload !== undefined ? { payload } : {}),
+    });
+    const set = r.headers['set-cookie'];
+    if (set) cookie = String(Array.isArray(set) ? set[0] : set).split(';')[0];
+    return { status: r.statusCode, body: r.json() };
+  };
+  try {
+    assert.equal((await send('tailscale', '/api/auth/setup', { setupCode: 'first-token', username: 'me', password: PASSWORD })).status, 200);
+    const start = await send('tailscale', '/api/settings/access');
+    assert.equal(start.body.via, 'tailscale');
+    assert.equal(start.body.tailscale, true);
+    assert.deepEqual(start.body.lan, { on: false, until: null });
+    assert.equal((await send('lan', '/api/settings/access')).status, 403, 'the home network is shut by default');
+    assert.equal((await send('spoof', '/api/settings/access')).status, 403, "naming the tailnet from another machine doesn't count as Tailscale");
+
+    assert.equal((await send('tailscale', '/api/settings/access', { tailscale: false })).status, 400, "Tailscale can't go off while it's the only way in");
+    const week = await send('tailscale', '/api/settings/access', { lan: { on: true, days: 7 } });
+    assert.equal(week.body.lan.on, true);
+    assert.ok(new Date(week.body.lan.until) > new Date());
+    assert.equal((await send('lan', '/api/settings/access')).body.via, 'lan');
+    assert.equal((await send('tailscale', '/api/settings/access', { tailscale: false })).status, 400, 'nor while the home network has an end date');
+
+    assert.equal((await send('lan', '/api/settings/access', { lan: { on: true, days: null } })).body.lan.until, null);
+    assert.equal((await send('lan', '/api/settings/access', { tailscale: false })).body.tailscale, false);
+    assert.equal((await send('tailscale', '/api/settings/access')).status, 403, 'Tailscale is shut');
+    assert.equal((await send('lan', '/api/settings/access', { lan: { on: false } })).status, 400, "the home network can't go off while Tailscale is");
+    assert.equal((await send('lan', '/api/settings/access', { tailscale: true })).body.tailscale, true);
+    assert.equal((await send('tailscale', '/api/settings/access', { lan: { on: false } })).body.lan.on, false);
+    assert.equal((await send('lan', '/api/settings/access')).status, 403);
+
+    // A timed opening shuts by itself once its time is up.
+    db.raw.prepare("INSERT INTO app_settings (key, value) VALUES ('access.lan', ?)").run(JSON.stringify({ on: true, until: '2000-01-01T00:00:00.000Z' }));
+    db.raw.prepare("INSERT INTO app_settings (key, value) VALUES ('access.tailscale', 'off')").run();
+    assert.equal((await send('lan', '/api/settings/access')).status, 403, 'expired');
+    assert.equal((await send('tailscale', '/api/settings/access')).body.tailscale, true, 'and Tailscale comes back on, so something is always open');
+  } finally {
+    await app.close();
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a shut way in tells a browser in plain words', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ohe-access-page-'));
+  const db = openDatabase(path.join(dir, 'orders.db'));
+  const app = buildApp({ db, tokens: { get: () => 't', rotate: () => 't' }, allowedHosts: () => true, access: { tailnetHost: 'hub.example.ts.net', lanReady: true, lanUrls: [] } });
+  try {
+    const r = await app.inject({ url: '/settings', remoteAddress: '10.0.0.20', headers: { host: '10.0.0.5:8787' } });
+    assert.equal(r.statusCode, 403);
+    assert.match(r.headers['content-type'], /text\/plain/);
+    assert.match(r.body, /Home-network access to Business Hub is turned off/);
+  } finally {
+    await app.close();
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

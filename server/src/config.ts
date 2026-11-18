@@ -11,6 +11,8 @@ export interface Config {
   port: number;
   dataDir: string;
   publicHost: string;
+  // Names on the home network, such as a local DNS name, to accept besides this machine's own.
+  lanHosts: string[];
   allowAnyClient: boolean;
   webRoot: string;
   tls: { cert: Buffer; key: Buffer } | null;
@@ -26,6 +28,10 @@ export function loadConfig(argv = process.argv, env = process.env): Config {
     port: Number(env.OHE_PORT) || 8787,
     dataDir: path.resolve(env.OHE_DATA_DIR || path.join(__dirname, '..', 'data')),
     publicHost: (env.OHE_PUBLIC_HOST || '').toLowerCase(),
+    lanHosts: (env.OHE_LAN_HOSTS || '')
+      .split(/[\s,]+/)
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean),
     allowAnyClient: env.OHE_ALLOW_PUBLIC_CLIENTS === '1',
     webRoot: path.resolve(env.OHE_WEB_ROOT || path.join(__dirname, '..', '..', 'web', 'dist')),
   };
@@ -63,6 +69,8 @@ export function allowedHostsFor(config: Config, addresses: string[]): string[] {
     for (const address of addresses) hosts.push(`${address}:${config.port}`);
     hosts.push(`${name}:${config.port}`, `${name}.local:${config.port}`);
   }
+  // A local name or address, reached directly on the port, or through a proxy on a standard one.
+  for (const name of config.lanHosts) hosts.push(name.includes(':') ? name : `${name}:${config.port}`, name);
   // A proxy such as Tailscale's serves on the standard port, so the name alone is sent.
   if (config.publicHost) hosts.push(config.publicHost, `${config.publicHost}:443`);
   return hosts;
