@@ -26,6 +26,7 @@ import { StayDetail } from './pages/StayDetail';
 import { Stays } from './pages/Stays';
 import { LeaseDetail } from './pages/LeaseDetail';
 import { Leases } from './pages/Leases';
+import { Hours } from './pages/Hours';
 import { ProfitLoss } from './pages/ProfitLoss';
 import { Setup as SetupScreen, SignIn } from './pages/SignIn';
 import type { SignedInUser } from './pages/SignIn';
@@ -129,6 +130,7 @@ function App() {
         <Route path="/stays" element={<Stays />} />
         <Route path="/stays/:id" element={<StayDetail />} />
         <Route path="/leases" element={<Leases />} />
+        <Route path="/hours" element={<Hours />} />
         <Route path="/profit-loss" element={<ProfitLoss />} />
         <Route path="/leases/:id" element={<LeaseDetail />} />
         <Route path="/orders" element={<Orders meta={meta} />} />

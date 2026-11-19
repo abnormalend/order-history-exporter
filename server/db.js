@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 32;
+const SCHEMA_VERSION = 33;
 
 // Links from Amazon's top bar, side cart and footer (its own card ads among them), which
 // a details page read too early can mistake for the items bought.
@@ -665,6 +665,86 @@ const SCHEMA_V32 = `
   CREATE INDEX receipts_kind ON receipts (kind);
 `;
 
+// Material participation hours. Each log is kept for one taxpayer (a married couple
+// counts as one), and holds the people whose hours it adds up. Hours are entered by
+// hand, imported, or worked out from stays (the turnover tasks after each check-out),
+// from repeating work such as mowing, and from purchases the owner installed.
+const SCHEMA_V33 = `
+  CREATE TABLE hour_logs (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE hour_people (
+    id INTEGER PRIMARY KEY,
+    log_id INTEGER NOT NULL REFERENCES hour_logs (id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    created_at TEXT NOT NULL,
+    UNIQUE (log_id, name)
+  );
+  -- Work done after every check-out: at one property, or at all of them when null.
+  CREATE TABLE hour_tasks (
+    id INTEGER PRIMARY KEY,
+    person_id INTEGER NOT NULL REFERENCES hour_people (id) ON DELETE CASCADE,
+    property_id TEXT REFERENCES stay_properties (id) ON DELETE CASCADE,
+    task TEXT NOT NULL,
+    minutes INTEGER NOT NULL,
+    from_date TEXT,
+    to_date TEXT,
+    created_at TEXT NOT NULL
+  );
+  -- Work repeated every so many days, such as mowing.
+  CREATE TABLE hour_recurring (
+    id INTEGER PRIMARY KEY,
+    person_id INTEGER NOT NULL REFERENCES hour_people (id) ON DELETE CASCADE,
+    entity_id INTEGER NOT NULL REFERENCES entities (id) ON DELETE CASCADE,
+    property_id TEXT REFERENCES stay_properties (id) ON DELETE SET NULL,
+    task TEXT NOT NULL,
+    minutes INTEGER NOT NULL,
+    every_days INTEGER NOT NULL DEFAULT 7,
+    start_date TEXT NOT NULL,
+    end_date TEXT,
+    created_at TEXT NOT NULL
+  );
+  -- source_key ties a worked-out entry to what it came from, so working the hours out
+  -- again updates it rather than adding it twice. edited: the owner changed it, so it
+  -- is kept as it is; removed: the owner took it out, so it isn't put back.
+  CREATE TABLE hour_entries (
+    id INTEGER PRIMARY KEY,
+    person_id INTEGER NOT NULL REFERENCES hour_people (id) ON DELETE CASCADE,
+    entity_id INTEGER REFERENCES entities (id) ON DELETE SET NULL,
+    property_id TEXT REFERENCES stay_properties (id) ON DELETE SET NULL,
+    worked_on TEXT NOT NULL,
+    task TEXT NOT NULL,
+    minutes INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    source_key TEXT UNIQUE,
+    note TEXT,
+    edited INTEGER NOT NULL DEFAULT 0,
+    removed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX hour_entries_day ON hour_entries (person_id, worked_on);
+  -- A payment for cleaning or other paid help. stay_id: the turnover a cleaner did, so
+  -- the owners' turnover hours for it are left out; hours: the helper's time, counted
+  -- against the owners in the "more than anyone else" test.
+  CREATE TABLE hour_help (
+    transaction_id INTEGER PRIMARY KEY REFERENCES bank_transactions (id) ON DELETE CASCADE,
+    is_help INTEGER NOT NULL,
+    stay_id TEXT REFERENCES stays (id) ON DELETE SET NULL,
+    hours REAL,
+    created_at TEXT NOT NULL
+  );
+  -- The owner's answer for a business purchase: whether they put it in themselves.
+  CREATE TABLE hour_purchases (
+    transaction_id INTEGER PRIMARY KEY REFERENCES bank_transactions (id) ON DELETE CASCADE,
+    installed INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+`;
+
 // Investment and retirement accounts: what kind each is (which decides how it's taxed
 // when spent) and whose it is in the household. Every balance is kept by day, for net
 // worth over time; balances already known start the history.
@@ -998,6 +1078,7 @@ function migrate(db, file) {
     }
     if (version < 31) db.exec(SCHEMA_V31);
     if (version < 32) db.exec(SCHEMA_V32);
+    if (version < 33) db.exec(SCHEMA_V33);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
