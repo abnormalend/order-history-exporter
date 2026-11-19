@@ -54,6 +54,7 @@ export function Review({ meta }: { meta: Meta | null }) {
   const accounts = useApi<{ accounts: Account[] }>('/api/bank/accounts');
   const rules = useApi<{ rules: Rule[]; accounts: { id: number; name: string }[] }>('/api/bank/rules');
   const receipts = useApi<{ counts: { review: number } }>('/api/receipts?limit=1');
+  const checks = useApi<{ counts: { review: number } }>('/api/receipts?limit=1&kind=check');
   const unmatched = useApi<{ total: number }>(`/api/bank/transactions?unmatched=1&preset=all&limit=1${business ? `&entity=${business}` : ''}`);
   // Everything waiting, in every business, to say when some is outside this one.
   const everywhere = useApi<{ total: number }>('/api/bank/transactions?review=1&kind=normal&preset=all&limit=1');
@@ -118,6 +119,14 @@ export function Review({ meta }: { meta: Meta | null }) {
           {receipts.data.counts.review === 1 ? '1 receipt needs' : `${receipts.data.counts.review} receipts need`} checking.{' '}
           <Link to="/receipts?view=review" className="font-medium underline">
             Check receipts
+          </Link>
+        </Banner>
+      )}
+      {checks.data && checks.data.counts.review > 0 && (
+        <Banner tone="warning">
+          {checks.data.counts.review === 1 ? '1 check needs' : `${checks.data.counts.review} checks need`} a look.{' '}
+          <Link to="/checks?view=review" className="font-medium underline">
+            Review checks
           </Link>
         </Banner>
       )}

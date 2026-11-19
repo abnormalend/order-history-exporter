@@ -124,6 +124,8 @@ function App() {
         <Route path="/more" element={<More />} />
         <Route path="/receipts" element={<Receipts />} />
         <Route path="/receipts/:id" element={<ReceiptDetail meta={meta} />} />
+        <Route path="/checks" element={<Receipts kind="check" />} />
+        <Route path="/checks/:id" element={<ReceiptDetail meta={meta} kind="check" />} />
         <Route path="/stays" element={<Stays />} />
         <Route path="/stays/:id" element={<StayDetail />} />
         <Route path="/leases" element={<Leases />} />

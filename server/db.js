@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 31;
+const SCHEMA_VERSION = 32;
 
 // Links from Amazon's top bar, side cart and footer (its own card ads among them), which
 // a details page read too early can mistake for the items bought.
@@ -651,6 +651,20 @@ const SCHEMA_V31 = `
   );
 `;
 
+// Checks: a photo of a check kept with the receipts, with its number, the business it
+// was written from (printed on it) and the account it's drawn on, so it can be linked
+// to the bank transaction when it clears.
+const SCHEMA_V32 = `
+  ALTER TABLE receipts ADD COLUMN kind TEXT NOT NULL DEFAULT 'receipt';
+  ALTER TABLE receipts ADD COLUMN check_number TEXT;
+  ALTER TABLE receipts ADD COLUMN check_payer TEXT;
+  ALTER TABLE receipts ADD COLUMN check_memo TEXT;
+  ALTER TABLE receipts ADD COLUMN entity_id INTEGER REFERENCES entities (id) ON DELETE SET NULL;
+  ALTER TABLE receipts ADD COLUMN entity_source TEXT;
+  ALTER TABLE receipts ADD COLUMN account_id INTEGER REFERENCES bank_accounts (id) ON DELETE SET NULL;
+  CREATE INDEX receipts_kind ON receipts (kind);
+`;
+
 // Investment and retirement accounts: what kind each is (which decides how it's taxed
 // when spent) and whose it is in the household. Every balance is kept by day, for net
 // worth over time; balances already known start the history.
@@ -983,6 +997,7 @@ function migrate(db, file) {
       db.exec(`DELETE FROM items WHERE (store, order_id) IN (${marked})`);
     }
     if (version < 31) db.exec(SCHEMA_V31);
+    if (version < 32) db.exec(SCHEMA_V32);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

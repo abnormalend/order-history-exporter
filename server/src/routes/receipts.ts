@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { HttpError, dateParam, queryOf } from '../params';
-import { RECEIPT_GROUPS } from '../receipts/service';
-import type { ReceiptGroup, ReceiptService, ReceiptView } from '../receipts/service';
+import { RECEIPT_GROUPS, RECEIPT_KINDS } from '../receipts/service';
+import type { ReceiptGroup, ReceiptKind, ReceiptService, ReceiptView } from '../receipts/service';
 import type { AuthedRequest } from '../app';
 
 const VIEWS: ReceiptView[] = ['all', 'review', 'unmatched', 'matched'];
@@ -36,6 +36,10 @@ export function receiptRoutes(app: FastifyInstance, receipts: ReceiptService, ca
   };
 
   const filtersOf = (query: URLSearchParams) => {
+    const kind = (query.get('kind') || 'receipt') as ReceiptKind;
+    if (!RECEIPT_KINDS.includes(kind)) throw new HttpError(400, 'Unknown kind.');
+    const entity = query.get('entity');
+    if (entity && !/^\d+$/.test(entity)) throw new HttpError(400, 'Unknown business.');
     const view = (query.get('view') || 'all') as ReceiptView;
     if (!VIEWS.includes(view)) throw new HttpError(400, 'Unknown view.');
     const group = (query.get('group') || 'month') as ReceiptGroup;
@@ -47,6 +51,8 @@ export function receiptRoutes(app: FastifyInstance, receipts: ReceiptService, ca
       return values.length ? values.slice(0, 100) : null;
     };
     return {
+      kind,
+      entity: entity ? Number(entity) : null,
       view,
       from: dateParam(query.get('from'), 'from'),
       to: dateParam(query.get('to'), 'to'),
@@ -62,10 +68,11 @@ export function receiptRoutes(app: FastifyInstance, receipts: ReceiptService, ca
     const query = queryOf(request.query);
     const limit = Math.min(Math.max(Number(query.get('limit')) || 60, 1), 200);
     const offset = Math.max(Number(query.get('offset')) || 0, 0);
+    const filters = filtersOf(query);
     return {
-      ...receipts.list(filtersOf(query), limit, offset),
-      choices: receipts.choices(),
-      counts: receipts.counts(),
+      ...receipts.list(filters, limit, offset),
+      choices: receipts.choices(filters.kind),
+      counts: receipts.counts(filters.kind),
       reader: receipts.keyStatus(),
     };
   });
@@ -79,13 +86,14 @@ export function receiptRoutes(app: FastifyInstance, receipts: ReceiptService, ca
         originalHash: z.string().regex(/^[a-f0-9]{64}$/, 'The file was not sent correctly.').optional().nullable(),
         data: base64.min(16, 'The file is empty.'),
         thumb: base64.optional().nullable(),
+        kind: z.enum(['receipt', 'check']).optional(),
       }),
       request.body
     );
     let result;
     try {
       result = receipts.add(
-        { originalHash: body.originalHash || null, fileName: body.fileName || null, data: Buffer.from(body.data, 'base64'), thumb: body.thumb ? Buffer.from(body.thumb, 'base64') : null },
+        { originalHash: body.originalHash || null, fileName: body.fileName || null, data: Buffer.from(body.data, 'base64'), thumb: body.thumb ? Buffer.from(body.thumb, 'base64') : null, kind: body.kind },
         user(request)
       );
     } catch (err) {
@@ -133,12 +141,22 @@ export function receiptRoutes(app: FastifyInstance, receipts: ReceiptService, ca
         category: z.string().max(60).nullable().optional(),
         note: z.string().max(1000).nullable().optional(),
         checked: z.boolean().optional(),
+        kind: z.enum(['receipt', 'check']).optional(),
+        checkNumber: z.string().max(20).nullable().optional(),
+        checkMemo: z.string().max(200).nullable().optional(),
+        entityId: z.number().int().positive().nullable().optional(),
       }),
       request.body
     );
     if (body.category && !categoryNames().includes(body.category)) throw new HttpError(400, 'Unknown category.');
     audit(request, 'receipt.update', { id });
-    return { receipt: receipts.update(id, body), suggestions: receipts.suggestions(id) };
+    let receipt;
+    try {
+      receipt = receipts.update(id, body);
+    } catch (err) {
+      fail(err);
+    }
+    return { receipt, suggestions: receipts.suggestions(id) };
   });
 
   app.post('/api/receipts/:id/read', async (request) => {

@@ -31,6 +31,9 @@ const READINGS = {
   personal: { vendor: 'Garden Center', date: '2026-05-08', total: 64.2, tax: null, card_last4: null, category: 'Garden & Outdoor' },
   maybe: { vendor: 'Mystery Shop', date: '2026-05-01', total: 23.45, tax: null, card_last4: null, category: null },
   smudged: { vendor: 'Paint Barn', date: '2026-04-04', total: 33, tax: null, card_last4: null, category: 'Building & Repair Materials', category_confidence: 'high', confidence: 'low' },
+  check1042: { document_type: 'check', vendor: 'Ace Plumbing', date: '2026-06-01', total: 450, tax: null, card_last4: '7788', check_number: '1042', check_payer: 'SAMPLE RENTALS, L.L.C.', check_memo: 'Unit 2 repair', category: null, items: [] },
+  check1043: { document_type: 'check', vendor: 'City Water', date: '2026-06-03', total: 120.5, tax: null, card_last4: null, check_number: '1043', check_payer: 'Other Holdings', check_memo: null, category: null, items: [] },
+  straycheck: { document_type: 'check', vendor: 'Lawn Pro', date: '2026-06-05', total: 75, tax: null, card_last4: null, check_number: '512', check_payer: 'Someone Else', check_memo: null, category: null, items: [] },
 };
 async function fakeReader(file) {
   const label = file.data.subarray(3).toString('latin1').trim();
@@ -335,4 +338,79 @@ test('a business purchase on a personal card goes in that business\'s books', as
   assert.equal(tx.status, 'business');
   assert.equal(tx.note, 'Paid with a personal card');
   await assert.rejects(post(`/api/receipts/${id}/paid-personally`, { entityId: entity }), /already attached/);
+});
+
+test('a check: its business from the name printed on it, linked by its number when it clears', async () => {
+  const stamp = new Date().toISOString();
+  const entity = (name) => Number(db.raw.prepare('INSERT INTO entities (name, created_at) VALUES (?, ?)').run(name, stamp).lastInsertRowid);
+  const rentals = entity('Sample Rentals LLC');
+  const holdings = entity('Other Holdings, Inc.');
+  const checking = async (name, last4, entityId) => {
+    const { account } = await post('/api/bank/import', { content: 'Date,Description,Amount\n01/02/2026,OPENING DEPOSIT,500.00\n', fileName: `${name}.csv`, newAccount: { name, kind: 'checking', owner: 'business' } }).then(async () => ({
+      account: db.raw.prepare('SELECT id FROM bank_accounts WHERE name = ?').get(name),
+    }));
+    db.raw.prepare('UPDATE bank_accounts SET last4 = ?, entity_id = ? WHERE id = ?').run(last4, entityId, account.id);
+    return account.id;
+  };
+  const rentalsChecking = await checking('Rentals checking', '7788', rentals);
+  const holdingsChecking = await checking('Holdings checking', '9900', holdings);
+
+  // Written from the rentals account (its number is on the bottom line).
+  const first = await upload('check1042', { kind: 'check' });
+  assert.equal(first.receipt.kind, 'check', 'a check from the moment it is taken');
+  await settled();
+  let check = (await get(`/api/receipts/${first.id}`)).receipt;
+  assert.equal(check.checkNumber, '1042');
+  assert.equal(check.vendor, 'Ace Plumbing');
+  assert.equal(check.checkMemo, 'Unit 2 repair');
+  assert.equal(check.entityName, 'Sample Rentals LLC');
+  assert.equal(check.accountId, rentalsChecking);
+  assert.equal(check.transactionId, null, 'waits for the bank');
+  assert.equal(check.checked, true, 'nothing doubtful about it');
+
+  // Weeks later: a check for the same amount, with another number, clears first.
+  const csv = 'Date,Description,Amount\n06/20/2026,CHECK 1041,-450.00\n07/02/2026,CHECK 0000001042,-450.00\n';
+  await post('/api/bank/import', { content: csv, fileName: 'rentals-july.csv', accountId: rentalsChecking });
+  check = (await get(`/api/receipts/${first.id}`)).receipt;
+  assert.equal(check.transaction.description, 'CHECK 0000001042', 'linked by its number, not just its amount');
+  assert.equal(check.matchSource, 'auto');
+  const { transactions } = await get(`/api/bank/transactions?preset=all&accountId=${rentalsChecking}`);
+  assert.equal(transactions.find((t) => t.description === 'CHECK 0000001042').receiptCheck, '1042');
+  assert.equal(transactions.find((t) => t.description === 'CHECK 1041').receiptCheck, null);
+
+  // Only the business name is printed: that business, and its one checking account.
+  const second = await upload('check1043', { kind: 'check' });
+  await settled();
+  check = (await get(`/api/receipts/${second.id}`)).receipt;
+  assert.equal(check.entityName, 'Other Holdings, Inc.');
+  assert.equal(check.accountId, holdingsChecking);
+  // The bank doesn't give the number. The same amount in another business's account isn't it.
+  await post('/api/bank/import', { content: 'Date,Description,Amount\n06/10/2026,CHECK PAID,-120.50\n', fileName: 'rentals-june.csv', accountId: rentalsChecking });
+  assert.equal((await get(`/api/receipts/${second.id}`)).receipt.transactionId, null);
+  assert.deepEqual((await get(`/api/receipts/${second.id}`)).suggestions, []);
+  await post('/api/bank/import', { content: 'Date,Description,Amount\n06/12/2026,CHECK PAID,-120.50\n', fileName: 'holdings-june.csv', accountId: holdingsChecking });
+  check = (await get(`/api/receipts/${second.id}`)).receipt;
+  assert.equal(check.transaction?.account, 'Holdings checking', 'a lone check line in its own account');
+
+  // A check photographed with the receipts becomes a check.
+  const stray = await upload('straycheck');
+  await settled();
+  assert.equal((await get(`/api/receipts/${stray.id}`)).receipt.kind, 'check');
+  const checks = await get('/api/receipts?kind=check');
+  assert.deepEqual(checks.receipts.map((r) => r.id).sort((a, b) => a - b), [first.id, second.id, stray.id]);
+  assert.equal(checks.counts.total, 3);
+  assert.ok(!(await get('/api/receipts?limit=200')).receipts.some((r) => r.kind === 'check'), 'receipts and checks are listed apart');
+  assert.deepEqual((await get(`/api/receipts?kind=check&entity=${rentals}`)).receipts.map((r) => r.id), [first.id]);
+
+  // The stray names no business we know: the user chooses one, and it stays.
+  assert.equal((await get(`/api/receipts/${stray.id}`)).receipt.entityId, null);
+  const chosen = await post(`/api/receipts/${stray.id}`, { entityId: holdings, checkNumber: '#00512' });
+  assert.equal(chosen.receipt.entityId, holdings);
+  assert.equal(chosen.receipt.entitySource, 'user');
+  assert.equal(chosen.receipt.checkNumber, '512');
+  await post(`/api/receipts/${stray.id}/read`);
+  await settled();
+  assert.equal((await get(`/api/receipts/${stray.id}`)).receipt.entityId, holdings, 'reading again keeps the business chosen by hand');
+  await assert.rejects(post(`/api/receipts/${stray.id}`, { entityId: 99999 }), /business was not found/);
+  assert.equal((await call('/api/receipts?kind=cheque')).status, 400);
 });

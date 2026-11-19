@@ -1,5 +1,6 @@
-// Receipts: stored files, reading them with Claude in the background, and matching
-// each one to the card or bank transaction it belongs to.
+// Receipts and checks: stored files, reading them with Claude in the background, and
+// matching each one to the card or bank transaction it belongs to. A check waits for
+// its number to clear the bank, and knows the business it was written from.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -38,12 +39,16 @@ export function sniff(data: Buffer): string | null {
 }
 
 export type ReceiptView = 'all' | 'review' | 'unmatched' | 'matched';
+export type ReceiptKind = 'receipt' | 'check';
+export const RECEIPT_KINDS: ReceiptKind[] = ['receipt', 'check'];
 
 export type ReceiptGroup = 'month' | 'vendor' | 'category';
 export const RECEIPT_GROUPS: ReceiptGroup[] = ['month', 'vendor', 'category'];
 
 export interface ReceiptFilters {
+  kind?: ReceiptKind;
   view?: ReceiptView;
+  entity?: number | null; // checks written from this business
   from?: string | null;
   to?: string | null;
   years?: string[] | null;
@@ -66,6 +71,11 @@ export interface ReceiptEdit {
   category?: string | null;
   note?: string | null;
   checked?: boolean;
+  // Checks.
+  kind?: ReceiptKind;
+  checkNumber?: string | null;
+  checkMemo?: string | null;
+  entityId?: number | null;
 }
 
 const now = () => new Date().toISOString();
@@ -73,6 +83,20 @@ const dayNumber = (date: string) => Math.round(Date.parse(`${date}T00:00:00Z`) /
 const shift = (date: string, days: number) => new Date((dayNumber(date) + days) * DAY_MS).toISOString().slice(0, 10);
 const validDate = (value: string | null | undefined) => (value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) ? value : null);
 const money = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) / 100 : null);
+// A check number as the bank prints it can carry leading zeros (CHECK 0000010027).
+const checkDigits = (value: unknown) => String(value ?? '').replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, 12) || null;
+// The numbers in a bank line that could be a check number, and whether it reads as a check.
+const numbersIn = (text: string) => new Set((text.match(/\d{3,12}/g) || []).map((n) => n.replace(/^0+(?=\d)/, '')));
+const READS_AS_CHECK = /\b(check|chk|ck|cheque|draft)\b|\bck#|\bcheck#/i;
+// A business's name without the parts people leave off: "SC Real Investments, LLC" is "sc real investments".
+const plainName = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\b(llc|l l c|inc|incorporated|corp|corporation|co|company|ltd|lp|llp|pllc|the)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
 export function receiptService(options: {
   db: DatabaseSync;
@@ -133,6 +157,15 @@ export function receiptService(options: {
     note: row.note,
     checked: Boolean(row.checked),
     checkedBy: (row.checked ? row.checked_by || 'user' : null) as 'user' | 'auto' | null,
+    kind: (row.kind || 'receipt') as ReceiptKind,
+    checkNumber: row.check_number ?? null,
+    checkPayer: row.check_payer ?? null,
+    checkMemo: row.check_memo ?? null,
+    entityId: row.entity_id ?? null,
+    entityName: row.entity_name ?? null,
+    entitySource: row.entity_source ?? null,
+    accountId: row.account_id ?? null,
+    accountName: row.drawn_account ?? null,
     transactionId: row.transaction_id,
     matchSource: row.match_source,
     transaction: row.tx_id
@@ -141,8 +174,10 @@ export function receiptService(options: {
     createdAt: row.created_at,
   });
 
-  const SELECT = `SELECT r.*, t.id AS tx_id, t.posted AS tx_posted, t.amount AS tx_amount, t.payee AS tx_payee, t.description AS tx_description, a.name AS tx_account
-    FROM receipts r LEFT JOIN bank_transactions t ON t.id = r.transaction_id LEFT JOIN bank_accounts a ON a.id = t.account_id`;
+  const SELECT = `SELECT r.*, t.id AS tx_id, t.posted AS tx_posted, t.amount AS tx_amount, t.payee AS tx_payee, t.description AS tx_description, a.name AS tx_account,
+      e.name AS entity_name, ca.name AS drawn_account
+    FROM receipts r LEFT JOIN bank_transactions t ON t.id = r.transaction_id LEFT JOIN bank_accounts a ON a.id = t.account_id
+      LEFT JOIN entities e ON e.id = r.entity_id LEFT JOIN bank_accounts ca ON ca.id = r.account_id`;
 
   const getRow = (id: number) => db.prepare('SELECT * FROM receipts WHERE id = ?').get(id) as Row | undefined;
   const get = (id: number) => {
@@ -168,6 +203,12 @@ export function receiptService(options: {
     const params: (string | number)[] = [];
     const filed = 'COALESCE(r.receipt_date, substr(r.created_at, 1, 10))';
     const marks = (n: number) => new Array(n).fill('?').join(', ');
+    clauses.push('r.kind = ?');
+    params.push(filters.kind || 'receipt');
+    if (filters.entity) {
+      clauses.push('r.entity_id = ?');
+      params.push(filters.entity);
+    }
     if (filters.view === 'review') clauses.push("(r.status = 'failed' OR (r.status = 'pending' AND r.read_error IS NOT NULL) OR (r.status = 'read' AND r.checked = 0))");
     if (filters.view === 'unmatched') clauses.push("r.transaction_id IS NULL AND r.status = 'read'");
     if (filters.view === 'matched') clauses.push('r.transaction_id IS NOT NULL');
@@ -192,8 +233,8 @@ export function receiptService(options: {
     }
     if (filters.q) {
       const like = '%' + filters.q.replace(/[\\%_]/g, '\\$&') + '%';
-      clauses.push("(r.vendor LIKE ? ESCAPE '\\' OR r.file_name LIKE ? ESCAPE '\\' OR r.note LIKE ? ESCAPE '\\' OR r.items LIKE ? ESCAPE '\\')");
-      params.push(like, like, like, like);
+      clauses.push("(r.vendor LIKE ? ESCAPE '\\' OR r.file_name LIKE ? ESCAPE '\\' OR r.note LIKE ? ESCAPE '\\' OR r.items LIKE ? ESCAPE '\\' OR r.check_number LIKE ? ESCAPE '\\' OR r.check_memo LIKE ? ESCAPE '\\')");
+      params.push(like, like, like, like, like, like);
     }
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
     let all = (db.prepare(SELECT + ' ' + where + ' ORDER BY ' + filed + ' DESC, r.id DESC').all(...params) as Row[]).map(toReceipt);
@@ -230,8 +271,8 @@ export function receiptService(options: {
   }
 
   // Everything that can be filtered on, with how many receipts each has.
-  function choices() {
-    const rows = db.prepare('SELECT vendor, category, COALESCE(receipt_date, substr(created_at, 1, 10)) AS filed FROM receipts').all() as Row[];
+  function choices(kind: ReceiptKind = 'receipt') {
+    const rows = db.prepare('SELECT vendor, category, COALESCE(receipt_date, substr(created_at, 1, 10)) AS filed FROM receipts WHERE kind = ?').all(kind) as Row[];
     const tally = (values: (string | null)[]) => {
       const map = new Map<string, number>();
       for (const v of values) if (v) map.set(v, (map.get(v) || 0) + 1);
@@ -244,16 +285,16 @@ export function receiptService(options: {
     };
   }
 
-  const counts = () => {
+  const counts = (kind: ReceiptKind = 'receipt') => {
     const row = db
       .prepare(
         `SELECT COUNT(*) AS total,
            SUM(CASE WHEN status = 'failed' OR (status = 'pending' AND read_error IS NOT NULL) OR (status = 'read' AND checked = 0) THEN 1 ELSE 0 END) AS review,
            SUM(CASE WHEN transaction_id IS NULL AND status = 'read' THEN 1 ELSE 0 END) AS unmatched,
            SUM(CASE WHEN status IN ('pending', 'reading') AND read_error IS NULL THEN 1 ELSE 0 END) AS reading
-         FROM receipts`
+         FROM receipts WHERE kind = ?`
       )
-      .get() as Row;
+      .get(kind) as Row;
     return { total: row.total ?? 0, review: row.review ?? 0, unmatched: row.unmatched ?? 0, reading: row.reading ?? 0 };
   };
 
@@ -274,7 +315,7 @@ export function receiptService(options: {
     return row?.thumb_path ? absolute(row.thumb_path) : null;
   };
 
-  function add(input: { originalHash: string | null; fileName: string | null; data: Buffer; thumb: Buffer | null }, username: string | null) {
+  function add(input: { originalHash: string | null; fileName: string | null; data: Buffer; thumb: Buffer | null; kind?: ReceiptKind }, username: string | null) {
     if (!root) throw new Error('Receipts are not available on this server.');
     input = { ...input, originalHash: input.originalHash || crypto.createHash('sha256').update(input.data).digest('hex') };
     const existing = db.prepare('SELECT id FROM receipts WHERE original_hash = ?').get(input.originalHash) as Row | undefined;
@@ -287,8 +328,8 @@ export function receiptService(options: {
     const thumb = input.thumb && sniff(input.thumb) === 'image/jpeg' && input.thumb.length < 512 * 1024 ? input.thumb : null;
     const id = Number(
       db
-        .prepare(`INSERT INTO receipts (original_hash, file_name, mime, size, stored_path, uploaded_by, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, ?, ?)`)
-        .run(input.originalHash!, input.fileName, mime, input.data.length, username, now(), now()).lastInsertRowid
+        .prepare(`INSERT INTO receipts (original_hash, file_name, mime, size, stored_path, uploaded_by, kind, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?)`)
+        .run(input.originalHash!, input.fileName, mime, input.data.length, username, input.kind || 'receipt', now(), now()).lastInsertRowid
     );
     const month = new Date().toISOString().slice(0, 7);
     const stored = path.join(month, `${id}-${input.originalHash!.slice(0, 8)}.${EXTENSIONS[mime]}`);
@@ -326,7 +367,17 @@ export function receiptService(options: {
 
   // The reader is sure enough that the user needn't confirm: a real receipt, high
   // confidence in the amount and date and in the category, and nothing missing.
-  function sureOf(r: ReceiptReading, category: string | null) {
+  function sureOf(r: ReceiptReading, category: string | null, check: boolean) {
+    // A check needs its number, payee, date and amount; what it was for can wait.
+    if (check)
+      return (
+        r.confidence === 'high' &&
+        Boolean(checkDigits(r.check_number)) &&
+        Boolean(r.vendor?.trim()) &&
+        Boolean(validDate(r.date)) &&
+        money(r.total) !== null &&
+        (money(r.total) as number) > 0
+      );
     return (
       r.is_receipt &&
       r.confidence === 'high' &&
@@ -346,21 +397,24 @@ export function receiptService(options: {
     if (!row) return 'gone';
     db.prepare(`UPDATE receipts SET status = 'reading', read_error = NULL, updated_at = ? WHERE id = ?`).run(now(), id);
     try {
-      const result = await reader({ data: fs.readFileSync(absolute(row.stored_path)), mime: row.mime }, categoryNames());
+      const result = await reader({ data: fs.readFileSync(absolute(row.stored_path)), mime: row.mime }, categoryNames(), row.kind === 'check' ? 'check' : undefined);
       const r = result.reading;
       const category = r.category && categoryNames().includes(r.category) ? r.category : null;
       // A field the user already corrected keeps their value.
       const fresh = getRow(id);
       if (!fresh) return 'gone';
       const keep = Boolean(fresh.checked);
+      // Taken as a check, or a check that came in with the receipts.
+      const check = fresh.kind === 'check' || r.document_type === 'check';
       // Sure of the amount, date, vendor and category: nothing for the user to check.
-      const sure = !keep && sureOf(r, category);
+      const sure = !keep && sureOf(r, category, check);
       db.prepare(
         `UPDATE receipts SET status = 'read', read_error = ?, read_at = ?, read_model = ?, input_tokens = ?, output_tokens = ?,
            vendor = ?, receipt_date = ?, currency = ?, subtotal = ?, tax = ?, tip = ?, total = ?, card_last4 = ?, payment_method = ?,
-           category = ?, items = ?, confidence = ?, reader_notes = ?, checked = ?, checked_by = ?, updated_at = ? WHERE id = ?`
+           category = ?, items = ?, confidence = ?, reader_notes = ?, checked = ?, checked_by = ?, kind = ?, check_number = ?, check_payer = ?, check_memo = ?,
+           updated_at = ? WHERE id = ?`
       ).run(
-        r.is_receipt ? null : "This doesn't look like a receipt.",
+        r.is_receipt || check ? null : "This doesn't look like a receipt.",
         now(),
         result.model,
         result.inputTokens,
@@ -380,9 +434,14 @@ export function receiptService(options: {
         r.notes?.slice(0, 500) ?? null,
         keep || sure ? 1 : 0,
         keep ? fresh.checked_by || 'user' : sure ? 'auto' : null,
+        check ? 'check' : 'receipt',
+        check ? (keep && fresh.check_number ? fresh.check_number : checkDigits(r.check_number)) : null,
+        check ? r.check_payer?.trim().slice(0, 120) || null : null,
+        check ? (keep ? fresh.check_memo : r.check_memo?.trim().slice(0, 200) || null) : null,
         now(),
         id
       );
+      if (check) placeCheck(id);
       if (!fresh.transaction_id) autoMatch(id);
       else bank.applyRules(`t.id = ${Number(fresh.transaction_id)}`);
       return 'read';
@@ -435,15 +494,109 @@ export function receiptService(options: {
     if ('cardLast4' in edit) fields.push(['card_last4', (edit.cardLast4 || '').replace(/\D/g, '').slice(-4) || null]);
     if ('category' in edit) fields.push(['category', edit.category || null]);
     if ('note' in edit) fields.push(['note', edit.note?.trim().slice(0, 1000) || null]);
+    if (edit.kind) fields.push(['kind', edit.kind]);
+    if ('checkNumber' in edit) fields.push(['check_number', checkDigits(edit.checkNumber)]);
+    if ('checkMemo' in edit) fields.push(['check_memo', edit.checkMemo?.trim().slice(0, 200) || null]);
+    if ('entityId' in edit) {
+      if (edit.entityId && !db.prepare('SELECT 1 FROM entities WHERE id = ?').get(edit.entityId)) throw new Error('That business was not found.');
+      // The business chosen by hand stands; clearing it lets the check's own name decide again.
+      fields.push(['entity_id', edit.entityId || null], ['entity_source', edit.entityId ? 'user' : null], ['account_id', null]);
+    }
     fields.push(['checked', edit.checked === false ? 0 : 1], ['checked_by', edit.checked === false ? null : 'user']);
     // Someone filled it in by hand, so it no longer waits on the reader.
     if (row.status !== 'read' && ('total' in edit || 'vendor' in edit)) fields.push(['status', 'read'], ['read_error', null]);
     fields.push(['updated_at', now()]);
     db.prepare(`UPDATE receipts SET ${fields.map(([c]) => `${c} = ?`).join(', ')} WHERE id = ?`).run(...(fields.map(([, v]) => v) as (string | number | null)[]), id);
+    if (getRow(id)!.kind === 'check') placeCheck(id);
     const after = getRow(id)!;
     if (after.transaction_id) bank.applyRules(`t.id = ${Number(after.transaction_id)}`);
     else autoMatch(id);
     return get(id);
+  }
+
+  /* ---------- Checks ---------- */
+
+  // The business a check was written from and the account it's drawn on: the account
+  // whose last four digits are in the check's bottom line, or else the business whose
+  // name is printed on it (and its checking account, when it has just one). A business
+  // the user chose stays.
+  function placeCheck(id: number) {
+    const row = getRow(id);
+    if (!row || row.kind !== 'check') return;
+    const checking = db.prepare(`SELECT id, last4, entity_id FROM bank_accounts WHERE kind = 'checking'`).all() as Row[];
+    let entity: number | null = row.entity_source === 'user' ? row.entity_id : null;
+    let account: number | null = null;
+    const byDigits = row.card_last4 ? checking.filter((a) => a.last4 && String(a.last4).slice(-4) === row.card_last4 && (!entity || a.entity_id === entity)) : [];
+    if (byDigits.length === 1) {
+      account = byDigits[0].id;
+      entity = entity ?? byDigits[0].entity_id ?? null;
+    }
+    if (!entity && row.check_payer) {
+      const printed = plainName(row.check_payer);
+      const named = (db.prepare('SELECT id, name FROM entities').all() as Row[]).filter((e) => {
+        const name = plainName(String(e.name));
+        return printed && name && (printed === name || (Math.min(printed.length, name.length) >= 6 && (printed.includes(name) || name.includes(printed))));
+      });
+      if (named.length === 1) entity = named[0].id;
+    }
+    if (!account && entity) {
+      const own = checking.filter((a) => a.entity_id === entity);
+      if (own.length === 1) account = own[0].id;
+    }
+    const source = row.entity_source === 'user' ? 'user' : entity ? 'reader' : null;
+    db.prepare('UPDATE receipts SET entity_id = ?, entity_source = ?, account_id = ? WHERE id = ?').run(entity, source, account, id);
+  }
+
+  // Bank transactions a check might have cleared as: the exact amount, from the day it
+  // was written to six months on, out of its own account (or its business's accounts).
+  // A bank line naming a different check number is never it.
+  function checkSuggestions(row: Row) {
+    const cents = toCents(row.total);
+    const date = (row.receipt_date as string | null) || String(row.created_at).slice(0, 10);
+    const accounts: number[] = row.account_id
+      ? [row.account_id]
+      : row.entity_id
+        ? (db.prepare('SELECT id FROM bank_accounts WHERE entity_id = ?').all(row.entity_id) as Row[]).map((a) => a.id)
+        : [];
+    const rows = db
+      .prepare(
+        `SELECT t.*, a.name AS account_name, a.kind AS account_kind FROM bank_transactions t JOIN bank_accounts a ON a.id = t.account_id
+         WHERE t.kind != 'transfer' AND t.amount < 0 AND a.kind != 'credit'
+           AND -CAST(ROUND(t.amount * 100) AS INTEGER) = ?
+           AND t.posted BETWEEN ? AND ?
+           ${accounts.length ? `AND t.account_id IN (${accounts.map(Number).join(',')})` : ''}
+           AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.transaction_id = t.id AND r.id != ?)
+         ORDER BY t.posted LIMIT 50`
+      )
+      .all(cents, shift(date, -5), shift(date, 180), row.id) as Row[];
+    const wanted = row.check_number as string | null;
+    return rows
+      .map((t) => {
+        const text = [t.description, t.payee, t.memo].filter(Boolean).join(' ');
+        const numbers = numbersIn(text);
+        const numberMatch = Boolean(wanted && numbers.has(wanted));
+        const readsAsCheck = READS_AS_CHECK.test(text);
+        const days = Math.abs(dayNumber(t.posted) - dayNumber(date));
+        const score = (numberMatch ? 60 : 0) + 30 + (readsAsCheck ? 10 : 0) + (accounts.length ? 10 : 0) + Math.max(0, 10 - Math.floor(days / 10));
+        return {
+          id: t.id as number,
+          posted: t.posted as string,
+          amount: t.amount as number,
+          payee: (t.payee || t.description) as string,
+          account: t.account_name as string,
+          exact: true,
+          vendorMatch: false,
+          cardMatch: accounts.length > 0,
+          numberMatch,
+          readsAsCheck,
+          // The bank named a check, and not this one.
+          otherNumber: Boolean(wanted && readsAsCheck && numbers.size && !numberMatch),
+          days,
+          score,
+        };
+      })
+      .filter((s) => !s.otherNumber)
+      .sort((a, b) => b.score - a.score);
   }
 
   /* ---------- Matching ---------- */
@@ -452,6 +605,7 @@ export function receiptService(options: {
   function suggestions(id: number) {
     const row = getRow(id);
     if (!row || row.total === null) return [];
+    if (row.kind === 'check') return checkSuggestions(row);
     const cents = toCents(row.total);
     const date = row.receipt_date as string | null;
     const rows = db
@@ -482,6 +636,9 @@ export function receiptService(options: {
           exact,
           vendorMatch,
           cardMatch,
+          numberMatch: false,
+          readsAsCheck: false,
+          otherNumber: false,
           days,
           score,
         };
@@ -495,6 +652,16 @@ export function receiptService(options: {
     const row = getRow(id);
     // A receipt the user unlinked by hand isn't matched again on its own.
     if (!row || row.transaction_id || row.status !== 'read' || row.match_source === 'user') return null;
+    if (row.kind === 'check') {
+      // Its number on the bank line settles it. With no number there, only a lone
+      // check-looking line in its own business's accounts does.
+      const found = checkSuggestions(row);
+      const numbered = found.filter((s) => s.numberMatch);
+      const pick = numbered.length === 1 ? numbered[0] : !numbered.length && found.length === 1 && found[0].readsAsCheck && found[0].cardMatch ? found[0] : null;
+      if (!pick) return null;
+      link(id, pick.id, 'auto');
+      return pick.id;
+    }
     // The same amount and day alone isn't enough (two $40 charges happen); the vendor
     // or the card must agree too, unless the receipt names no vendor at all.
     const exact = suggestions(id).filter((s) => s.exact);

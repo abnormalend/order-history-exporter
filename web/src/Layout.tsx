@@ -1,7 +1,7 @@
 // The app frame: a sidebar on wide screens, a tab bar along the bottom on phones.
 import type { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
-import { ArrowLeftRight, BedDouble, ChartLine, FileCheck2, KeyRound, FileSpreadsheet, Inbox, Landmark, LayoutDashboard, LogOut, Menu, Package, Receipt, Settings, Sunset, Tags, TrendingUp, Upload, Wallet } from 'lucide-react';
+import { ArrowLeftRight, BedDouble, ChartLine, FileCheck2, KeyRound, FileSpreadsheet, Inbox, Landmark, LayoutDashboard, LogOut, Menu, Package, Receipt, ScrollText, Settings, Sunset, Tags, TrendingUp, Upload, Wallet } from 'lucide-react';
 import { BusinessPicker, useBusiness } from './business';
 import { ExpiryWarning } from './rentroll';
 import { LoanPaymentPrompt } from './loans';
@@ -21,6 +21,7 @@ export const NAV = [
   { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight, phone: true },
   { to: '/review', label: 'Review', icon: Inbox, phone: true },
   { to: '/receipts', label: 'Receipts', icon: Receipt, phone: true },
+  { to: '/checks', label: 'Checks', icon: ScrollText },
   { to: '/import', label: 'Import', icon: Upload },
   { to: '/orders', label: 'Orders', icon: Package },
   { to: '/items', label: 'Items', icon: Tags },

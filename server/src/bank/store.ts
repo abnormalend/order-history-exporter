@@ -1016,6 +1016,8 @@ export function createBankStore(db: DatabaseSync) {
     // Bought in the store: no online order to match.
     noOrder: Boolean(row.no_order),
     receiptVendor: row.receipt_vendor ?? null,
+    // A check, with its number, rather than a receipt.
+    receiptCheck: row.receipt_kind && String(row.receipt_kind).startsWith('check') ? String(row.receipt_kind).split(String.fromCharCode(2))[1] || '' : null,
     // Receipts not linked to anything yet with this charge's exact amount, dated just before it.
     possibleReceipts: row.possible_receipts ? String(row.possible_receipts).split(',').map(Number) : [],
     entityId: row.entity_id ?? null,
@@ -1062,11 +1064,13 @@ export function createBankStore(db: DatabaseSync) {
                 (SELECT r.id FROM receipts r WHERE r.transaction_id = t.id ORDER BY r.id LIMIT 1) AS receipt_id,
                 ${LEASE_LINKED} AS lease_linked,
                 (SELECT r.vendor FROM receipts r WHERE r.transaction_id = t.id ORDER BY r.id LIMIT 1) AS receipt_vendor,
+                (SELECT r.kind || char(2) || COALESCE(r.check_number, '') FROM receipts r WHERE r.transaction_id = t.id ORDER BY r.id LIMIT 1) AS receipt_kind,
                 CASE WHEN t.amount < 0 AND t.kind != 'transfer' AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.transaction_id = t.id) THEN
                   (SELECT GROUP_CONCAT(r.id) FROM receipts r
                      WHERE r.transaction_id IS NULL AND r.status = 'read' AND r.total > 0 AND COALESCE(r.match_source, '') != 'user'
                        AND CAST(ROUND(r.total * 100) AS INTEGER) = -CAST(ROUND(t.amount * 100) AS INTEGER)
-                       AND (r.receipt_date IS NULL OR t.posted BETWEEN date(r.receipt_date, '-3 days') AND date(r.receipt_date, '+10 days')))
+                       AND (r.receipt_date IS NULL OR (r.kind = 'check' AND t.posted BETWEEN date(r.receipt_date, '-5 days') AND date(r.receipt_date, '+180 days'))
+                         OR (r.kind != 'check' AND t.posted BETWEEN date(r.receipt_date, '-3 days') AND date(r.receipt_date, '+10 days'))))
                 END AS possible_receipts,
                 (SELECT GROUP_CONCAT(es.entity_id || ':' || es.percent) FROM tx_entity_shares es WHERE es.transaction_id = t.id) AS shares,
                 (SELECT GROUP_CONCAT(l.store || char(2) || l.order_id || char(2) || l.amount, char(1)) FROM order_links l WHERE l.transaction_id = t.id) AS linked_orders,

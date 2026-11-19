@@ -60,6 +60,8 @@ export interface Transaction {
   files: { id: number; name: string | null; source: string }[];
   receiptId: number | null;
   receiptVendor: string | null;
+  // The attached photo is a check, with this number (empty when not known).
+  receiptCheck: string | null;
   possibleReceipts: number[];
   entityId: number | null;
   entitySource: string | null;
@@ -118,11 +120,13 @@ export function SourceBadges({ sources, files = [] }: { sources: string[]; files
           <span className="truncate">{f.name || SOURCE_LABELS[f.source] || f.source}</span>
         </Link>
       ))}
-      {sources.filter((s) => !fromFiles.has(s)).map((s) => (
-        <span key={s} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-          {SOURCE_LABELS[s] || s}
-        </span>
-      ))}
+      {sources
+        .filter((s) => !fromFiles.has(s))
+        .map((s) => (
+          <span key={s} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+            {SOURCE_LABELS[s] || s}
+          </span>
+        ))}
     </>
   );
 }
@@ -211,7 +215,12 @@ export function TxRow({
         <div className="min-w-0">
           <div className="truncate font-medium" title={tx.description}>
             {onPayee ? (
-              <button type="button" onClick={() => onPayee(label)} className="max-w-full truncate text-left hover:text-emerald-700 hover:underline dark:hover:text-emerald-400" title={`Show only ${label}`}>
+              <button
+                type="button"
+                onClick={() => onPayee(label)}
+                className="max-w-full truncate text-left hover:text-emerald-700 hover:underline dark:hover:text-emerald-400"
+                title={`Show only ${label}`}
+              >
                 {label}
               </button>
             ) : (
@@ -224,9 +233,17 @@ export function TxRow({
             {tx.payee && tx.payee !== tx.description && <span className="truncate">· {tx.description}</span>}
             {tx.kind === 'transfer' && <span>· Transfer{tx.transferAccount ? ` with ${tx.transferAccount}` : ''}</span>}
             {tx.receiptId && (
-              <Link to={`/receipts/${tx.receiptId}`} className="inline-flex items-center gap-0.5 text-emerald-700 hover:underline dark:text-emerald-400">
+              <Link
+                to={`${tx.receiptCheck !== null ? '/checks' : '/receipts'}/${tx.receiptId}`}
+                className="inline-flex items-center gap-0.5 text-emerald-700 hover:underline dark:text-emerald-400"
+                title={tx.receiptCheck !== null ? 'See the check' : 'See the receipt'}
+              >
                 <Paperclip className="size-3" aria-hidden />
-                {tx.receiptVendor ? `Receipt: ${tx.receiptVendor}` : 'Receipt'}
+                {tx.receiptCheck !== null
+                  ? `Check${tx.receiptCheck ? ` #${tx.receiptCheck}` : ''}${tx.receiptVendor ? `: ${tx.receiptVendor}` : ''}`
+                  : tx.receiptVendor
+                    ? `Receipt: ${tx.receiptVendor}`
+                    : 'Receipt'}
               </Link>
             )}
             {!tx.receiptId &&
@@ -261,16 +278,18 @@ export function TxRow({
                   </button>
                 )}
               </span>
-            ) : (tx.orders.length > 0 || isStoreCharge) && (
-              <button
-                type="button"
-                aria-expanded={panel === 'orders'}
-                onClick={() => setPanel(panel === 'orders' ? null : 'orders')}
-                className={cx('inline-flex items-center gap-0.5 hover:underline', tx.orders.length ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400')}
-              >
-                <ShoppingCart className="size-3" aria-hidden />
-                {tx.orders.length ? (tx.orders.length === 1 ? 'Order ' + tx.orders[0].orderId : `${tx.orders.length} orders`) : 'Find its order'}
-              </button>
+            ) : (
+              (tx.orders.length > 0 || isStoreCharge) && (
+                <button
+                  type="button"
+                  aria-expanded={panel === 'orders'}
+                  onClick={() => setPanel(panel === 'orders' ? null : 'orders')}
+                  className={cx('inline-flex items-center gap-0.5 hover:underline', tx.orders.length ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400')}
+                >
+                  <ShoppingCart className="size-3" aria-hidden />
+                  {tx.orders.length ? (tx.orders.length === 1 ? 'Order ' + tx.orders[0].orderId : `${tx.orders.length} orders`) : 'Find its order'}
+                </button>
+              )
             )}
             {tx.shares.length > 0 && <span>· Shared: {shareText(tx.shares, entities)}</span>}
             <SourceBadges sources={tx.sources} files={tx.files} />
@@ -520,7 +539,14 @@ export function ShareEditor({ entities, initial, busy, onSave, onCancel }: { ent
           <label key={e.id} className="flex items-center justify-between gap-2">
             <span className="truncate">{e.name}</span>
             <span className="flex items-center gap-1">
-              <Input className="min-h-8 w-20 py-1 text-right text-xs" inputMode="decimal" value={values[e.id] ?? ''} onChange={(ev) => setValues({ ...values, [e.id]: ev.target.value })} aria-label={`${e.name} percent`} />%
+              <Input
+                className="min-h-8 w-20 py-1 text-right text-xs"
+                inputMode="decimal"
+                value={values[e.id] ?? ''}
+                onChange={(ev) => setValues({ ...values, [e.id]: ev.target.value })}
+                aria-label={`${e.name} percent`}
+              />
+              %
             </span>
           </label>
         ))}
@@ -589,7 +615,10 @@ export function BulkBar({ ids, rows = [], categories, entities = [], onDone }: {
   // After a rule is saved the selection clears; say so until it's dismissed.
   if (!ids.length)
     return saved ? (
-      <div role="status" className="flex items-center gap-3 border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100">
+      <div
+        role="status"
+        className="flex items-center gap-3 border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100"
+      >
         <span className="flex-1">{saved} Rules are listed on the Review page.</span>
         <Button variant="ghost" className="min-h-8" onClick={() => setSaved('')}>
           OK

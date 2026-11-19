@@ -1,16 +1,16 @@
-// One receipt: the photo, what was read from it (editable), and its transaction.
+// One receipt or check: the photo, what was read from it (editable), and its transaction.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TouchEvent } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, ChevronLeft, ChevronRight, CreditCard, ExternalLink, Link2, RefreshCw, Trash2, Unlink, Wallet } from 'lucide-react';
+import { ArrowLeft, ArrowLeftRight, ChevronLeft, ChevronRight, Clock, CreditCard, ExternalLink, Link2, RefreshCw, Trash2, Unlink, Wallet } from 'lucide-react';
 import { post, useApi } from '../api';
 import { Amount } from '../bank';
 import { useBusiness } from '../business';
 import { useFilters } from '../filters';
 import type { Meta } from '../filters';
 import { money, plural } from '../format';
-import { STATUS_LABELS, receiptQuery } from '../receipts';
-import type { Receipt, Suggestion } from '../receipts';
+import { KIND_PATH, STATUS_LABELS, receiptQuery } from '../receipts';
+import type { Receipt, ReceiptKind, Suggestion } from '../receipts';
 import { Banner, Button, Card, Confirm, Empty, Field, Input, Loading, Select, TD, TH, TR } from '../ui';
 
 interface Form {
@@ -22,6 +22,9 @@ interface Form {
   cardLast4: string;
   category: string;
   note: string;
+  checkNumber: string;
+  checkMemo: string;
+  entityId: string;
 }
 
 const toForm = (r: Receipt): Form => ({
@@ -33,6 +36,9 @@ const toForm = (r: Receipt): Form => ({
   cardLast4: r.cardLast4 || '',
   category: r.category || '',
   note: r.note || '',
+  checkNumber: r.checkNumber || '',
+  checkMemo: r.checkMemo || '',
+  entityId: r.entityId ? String(r.entityId) : '',
 });
 const number = (text: string) => (text.trim() === '' ? null : Number(text.replace(/[$,\s]/g, '')));
 const same = (a: Form, b: Form) => JSON.stringify(a) === JSON.stringify(b);
@@ -47,17 +53,19 @@ interface Nav {
   toCheck: number;
 }
 
-export function ReceiptDetail({ meta }: { meta: Meta | null }) {
+export function ReceiptDetail({ meta, kind = 'receipt' }: { meta: Meta | null; kind?: ReceiptKind }) {
   const { id } = useParams();
+  const base = KIND_PATH[kind];
+  const { business, entities } = useBusiness();
   const navigate = useNavigate();
   const location = useLocation();
   const filters = useFilters();
   // The list this receipt was opened from, kept in the address so Back, Close and the
   // arrows all return to (or step through) the same receipts.
   const search = location.search;
-  const listUrl = `/receipts${search}`;
+  const listUrl = `${base}${search}`;
   const { data, error, loading, reload } = useApi<{ receipt: Receipt; suggestions: Suggestion[] }>(`/api/receipts/${encodeURIComponent(id || '')}`);
-  const nav = useApi<Nav>(`/api/receipts/${encodeURIComponent(id || '')}/nav?${receiptQuery(filters)}`);
+  const nav = useApi<Nav>(`/api/receipts/${encodeURIComponent(id || '')}/nav?${receiptQuery(filters, kind, business)}`);
   const [form, setForm] = useState<Form | null>(null);
   const [busy, setBusy] = useState(false);
   const flash = (location.state as { flash?: string } | null)?.flash;
@@ -82,9 +90,9 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
     (target: number | null, state?: { flash: string }) => {
       if (!target) return;
       if (!state && dirty && !window.confirm('Leave without saving your changes?')) return;
-      navigate(`/receipts/${target}${search}`, { state });
+      navigate(`${base}/${target}${search}`, { state });
     },
-    [dirty, navigate, search]
+    [dirty, navigate, search, base],
   );
   const close = useCallback(() => {
     if (dirty && !window.confirm('Leave without saving your changes?')) return;
@@ -127,7 +135,7 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
       await post(`/api/receipts/${id}`, body);
       const left = nav.data?.toCheck ?? 0;
       setBusy(false);
-      if (nav.data?.nextToCheck) open(nav.data.nextToCheck, { flash: `Saved. ${left ? `${plural(left, 'receipt')} left to check.` : ''}` });
+      if (nav.data?.nextToCheck) open(nav.data.nextToCheck, { flash: `Saved. ${left ? `${plural(left, kind)} left to check.` : ''}` });
       else navigate(listUrl, { state: { flash: 'Saved. Nothing left to check here.' } });
       return;
     } catch (e) {
@@ -158,6 +166,8 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
 
   if (!data) return error ? <Banner>{error.message}</Banner> : loading ? <Loading /> : null;
   const r = data.receipt;
+  const isCheck = r.kind === 'check';
+  const noun = isCheck ? 'check' : 'receipt';
   const isPdf = r.mime === 'application/pdf';
   const invalid = form && [form.total, form.tax, form.tip].some((v) => v.trim() !== '' && !Number.isFinite(number(v)));
 
@@ -175,23 +185,40 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
             }}
             className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
           >
-            <ArrowLeft className="size-4" aria-hidden /> All receipts
+            <ArrowLeft className="size-4" aria-hidden /> {kind === 'check' ? 'All checks' : 'All receipts'}
           </Link>
           {n && n.position !== null && n.total > 1 && (
             <div className="flex items-center gap-1">
-              <Button className="min-h-8 px-2" disabled={!n.prev} onClick={() => open(n.prev)} aria-label="Previous receipt" title="Previous receipt">
+              <Button className="min-h-8 px-2" disabled={!n.prev} onClick={() => open(n.prev)} aria-label={`Previous ${kind}`} title={`Previous ${kind}`}>
                 <ChevronLeft className="size-4" aria-hidden />
               </Button>
               <span className="min-w-14 text-center text-xs text-slate-600 tabular-nums dark:text-slate-400">
                 {n.position} of {n.total}
               </span>
-              <Button className="min-h-8 px-2" disabled={!n.next} onClick={() => open(n.next)} aria-label="Next receipt" title="Next receipt">
+              <Button className="min-h-8 px-2" disabled={!n.next} onClick={() => open(n.next)} aria-label={`Next ${kind}`} title={`Next ${kind}`}>
                 <ChevronRight className="size-4" aria-hidden />
               </Button>
             </div>
           )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Button
+            disabled={busy}
+            title={isCheck ? 'Not a check: move it to the receipts' : 'This is a check: move it to the checks'}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await post(`/api/receipts/${r.id}`, { kind: isCheck ? 'receipt' : 'check', checked: r.checked });
+                navigate(`${KIND_PATH[isCheck ? 'receipt' : 'check']}/${r.id}`, { state: { flash: isCheck ? 'Moved to the receipts.' : 'Moved to the checks.' } });
+              } catch (e) {
+                setMessage({ tone: 'error', text: (e as Error).message });
+              }
+              setBusy(false);
+            }}
+          >
+            <ArrowLeftRight className="size-4" aria-hidden />
+            {isCheck ? 'Not a check' : "It's a check"}
+          </Button>
           <Button disabled={busy || Boolean(reading)} onClick={() => act(`/api/receipts/${r.id}/read`, {}, 'Reading it again.')}>
             <RefreshCw className="size-4" aria-hidden />
             Read again
@@ -202,11 +229,14 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
           </Button>
         </div>
       </div>
-      <h1 className="mb-1 text-2xl font-semibold tracking-tight">{r.vendor || r.fileName || 'Receipt'}</h1>
+      <h1 className="mb-1 text-2xl font-semibold tracking-tight">
+        {isCheck ? `Check${r.checkNumber ? ` #${r.checkNumber}` : ''}${r.vendor ? ` to ${r.vendor}` : ''}` : r.vendor || r.fileName || 'Receipt'}
+      </h1>
       <p className="mb-5 text-sm text-slate-600 dark:text-slate-400">
         {STATUS_LABELS[r.status]}
         {r.confidence && r.status === 'read' ? ` · ${r.confidence} confidence` : ''}
         {r.checked ? (r.checkedBy === 'auto' ? ' · confirmed automatically' : ' · checked by you') : r.status === 'read' ? ' · not checked yet' : ''}
+        {isCheck && r.entityName ? ` · written from ${r.entityName}${r.accountName ? ` (${r.accountName})` : ''}` : ''}
       </p>
       {message && <Banner tone={message.tone}>{message.text}</Banner>}
       {r.readError && <Banner tone={r.status === 'failed' ? 'error' : 'warning'}>{r.readError}</Banner>}
@@ -222,7 +252,11 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
             </div>
           ) : (
             <a href={`/api/receipts/${r.id}/file`} target="_blank" rel="noopener" title="Open full size">
-              <img src={`/api/receipts/${r.id}/file`} alt={`Receipt${r.vendor ? ` from ${r.vendor}` : ''}`} className="max-h-[75vh] w-full object-contain" />
+              <img
+                src={`/api/receipts/${r.id}/file`}
+                alt={isCheck ? `Check${r.checkNumber ? ` ${r.checkNumber}` : ''}${r.vendor ? ` to ${r.vendor}` : ''}` : `Receipt${r.vendor ? ` from ${r.vendor}` : ''}`}
+                className="max-h-[75vh] w-full object-contain"
+              />
             </a>
           )}
         </Card>
@@ -238,36 +272,66 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
                 onSubmit={(e) => {
                   e.preventDefault();
                   save({
-                      vendor: form.vendor || null,
-                      date: form.date || null,
-                      total: number(form.total),
-                      tax: number(form.tax),
-                      tip: number(form.tip),
-                      cardLast4: form.cardLast4 || null,
-                      category: form.category || null,
-                      note: form.note || null,
-                      checked: true,
+                    vendor: form.vendor || null,
+                    date: form.date || null,
+                    total: number(form.total),
+                    category: form.category || null,
+                    note: form.note || null,
+                    checked: true,
+                    ...(isCheck
+                      ? {
+                          checkNumber: form.checkNumber || null,
+                          checkMemo: form.checkMemo || null,
+                          // Only a business changed here counts as chosen by hand.
+                          ...(form.entityId !== (r.entityId ? String(r.entityId) : '') ? { entityId: form.entityId ? Number(form.entityId) : null } : {}),
+                        }
+                      : { tax: number(form.tax), tip: number(form.tip), cardLast4: form.cardLast4 || null }),
                   });
                 }}
               >
-                <Field label="Vendor" className="col-span-2">
+                <Field label={isCheck ? 'Paid to' : 'Vendor'} className="col-span-2">
                   <Input value={form.vendor} onChange={(e) => setForm({ ...form, vendor: e.target.value })} maxLength={120} />
                 </Field>
-                <Field label="Date">
+                {isCheck && (
+                  <>
+                    <Field label="Check number">
+                      <Input inputMode="numeric" value={form.checkNumber} onChange={(e) => setForm({ ...form, checkNumber: e.target.value })} maxLength={20} />
+                    </Field>
+                    <Field label="Business">
+                      <Select value={form.entityId} onChange={(e) => setForm({ ...form, entityId: e.target.value })}>
+                        <option value="">Not known</option>
+                        {entities.map((e) => (
+                          <option key={e.id} value={e.id}>
+                            {e.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                  </>
+                )}
+                <Field label={isCheck ? 'Date written' : 'Date'}>
                   <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
                 </Field>
-                <Field label="Total paid">
+                <Field label={isCheck ? 'Amount' : 'Total paid'}>
                   <Input inputMode="decimal" value={form.total} onChange={(e) => setForm({ ...form, total: e.target.value })} />
                 </Field>
-                <Field label="Tax">
-                  <Input inputMode="decimal" value={form.tax} onChange={(e) => setForm({ ...form, tax: e.target.value })} />
-                </Field>
-                <Field label="Tip">
-                  <Input inputMode="decimal" value={form.tip} onChange={(e) => setForm({ ...form, tip: e.target.value })} />
-                </Field>
-                <Field label="Card (last 4)">
-                  <Input inputMode="numeric" value={form.cardLast4} onChange={(e) => setForm({ ...form, cardLast4: e.target.value })} maxLength={4} />
-                </Field>
+                {isCheck ? (
+                  <Field label="Memo" className="col-span-2">
+                    <Input value={form.checkMemo} onChange={(e) => setForm({ ...form, checkMemo: e.target.value })} maxLength={200} />
+                  </Field>
+                ) : (
+                  <>
+                    <Field label="Tax">
+                      <Input inputMode="decimal" value={form.tax} onChange={(e) => setForm({ ...form, tax: e.target.value })} />
+                    </Field>
+                    <Field label="Tip">
+                      <Input inputMode="decimal" value={form.tip} onChange={(e) => setForm({ ...form, tip: e.target.value })} />
+                    </Field>
+                    <Field label="Card (last 4)">
+                      <Input inputMode="numeric" value={form.cardLast4} onChange={(e) => setForm({ ...form, cardLast4: e.target.value })} maxLength={4} />
+                    </Field>
+                  </>
+                )}
                 <Field label="Category">
                   <Select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
                     <option value="">None</option>
@@ -323,8 +387,8 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
 
       <Confirm
         open={confirm}
-        title="Delete this receipt?"
-        confirmLabel="Delete receipt"
+        title={`Delete this ${noun}?`}
+        confirmLabel={`Delete ${noun}`}
         busy={busy}
         onCancel={() => setConfirm(false)}
         onConfirm={async () => {
@@ -333,7 +397,7 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
             await post(`/api/receipts/${r.id}/delete`);
             setBusy(false);
             const after = n?.next ?? n?.prev ?? null;
-            if (after) open(after, { flash: 'Receipt deleted.' });
+            if (after) open(after, { flash: isCheck ? 'Check deleted.' : 'Receipt deleted.' });
             else navigate(listUrl);
           } catch (e) {
             setMessage({ tone: 'error', text: (e as Error).message });
@@ -349,18 +413,19 @@ export function ReceiptDetail({ meta }: { meta: Meta | null }) {
 }
 
 function MatchCard({ receipt: r, suggestions, busy, act }: { receipt: Receipt; suggestions: Suggestion[]; busy: boolean; act: (path: string, body?: unknown, done?: string) => void }) {
+  const isCheck = r.kind === 'check';
   // A business purchase on a personal card goes in the chosen business's books.
   const { business, entities } = useBusiness();
   const [payer, setPayer] = useState(business ? String(business) : entities.length === 1 ? String(entities[0].id) : '');
   if (r.transaction) {
     const t = r.transaction;
     return (
-      <Card title="Matched transaction">
+      <Card title={isCheck ? 'Cleared at the bank' : 'Matched transaction'}>
         <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
           <div>
             <div className="font-medium">{t.payee || t.description}</div>
             <div className="text-xs text-slate-500 dark:text-slate-400">
-              {t.posted} · {t.account} · {r.matchSource === 'auto' ? 'matched automatically' : 'matched by you'}
+              {isCheck ? `Cleared ${t.posted}` : t.posted} · {t.account} · {r.matchSource === 'auto' ? 'matched automatically' : 'matched by you'}
             </div>
           </div>
           <Amount value={t.amount} className="font-medium" />
@@ -381,9 +446,9 @@ function MatchCard({ receipt: r, suggestions, busy, act }: { receipt: Receipt; s
     );
   }
   return (
-    <Card title="Match to a transaction">
+    <Card title={isCheck ? 'Waiting to clear' : 'Match to a transaction'}>
       {r.status !== 'read' ? (
-        <Empty>Matching starts once the receipt is read or filled in.</Empty>
+        <Empty>Matching starts once the {isCheck ? 'check' : 'receipt'} is read or filled in.</Empty>
       ) : (
         <>
           {suggestions.length ? (
@@ -394,7 +459,12 @@ function MatchCard({ receipt: r, suggestions, busy, act }: { receipt: Receipt; s
                     <div className="truncate font-medium">{s.payee}</div>
                     <div className="text-xs text-slate-500 dark:text-slate-400">
                       {s.posted} · {s.account}
-                      {[s.vendorMatch && 'same vendor', s.cardMatch && 'same card', !s.exact && 'amount differs (a tip?)'].filter(Boolean).map((w) => ` · ${w}`)}
+                      {(isCheck
+                        ? [s.numberMatch && 'same check number', !s.numberMatch && s.readsAsCheck && 'a check, number not given', s.cardMatch && "its business's account"]
+                        : [s.vendorMatch && 'same vendor', s.cardMatch && 'same card', !s.exact && 'amount differs (a tip?)']
+                      )
+                        .filter(Boolean)
+                        .map((w) => ` · ${w}`)}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -408,34 +478,47 @@ function MatchCard({ receipt: r, suggestions, busy, act }: { receipt: Receipt; s
               ))}
             </ul>
           ) : (
-            <p className="mb-3 text-sm text-slate-600 dark:text-slate-400">
-              No card or bank transaction matches yet. If the charge hasn't come through, it's matched automatically when it does.
+            <p className="mb-3 flex items-start gap-1.5 text-sm text-slate-600 dark:text-slate-400">
+              {isCheck ? (
+                <>
+                  <Clock className="mt-0.5 size-4 shrink-0" aria-hidden />
+                  Not cleared yet. When it shows up at the bank, it's linked automatically by its number and amount.
+                </>
+              ) : (
+                "No card or bank transaction matches yet. If the charge hasn't come through, it's matched automatically when it does."
+              )}
             </p>
           )}
-          <Button disabled={busy || r.total === null || !r.date} onClick={() => act(`/api/receipts/${r.id}/cash`, {}, 'Recorded as a cash purchase.')}>
-            <Wallet className="size-4" aria-hidden />
-            Paid in cash: record it
-          </Button>
-          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3 dark:border-slate-800">
-            {entities.length > 1 && (
-              <Select aria-label="Business this was for" value={payer} onChange={(e) => setPayer(e.target.value)} className="w-auto">
-                <option value="">Which business?</option>
-                {entities.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.name}
-                  </option>
-                ))}
-              </Select>
-            )}
-            <Button
-              disabled={busy || r.total === null || !r.date || (entities.length > 1 && !payer)}
-              onClick={() => act(`/api/receipts/${r.id}/paid-personally`, { entityId: payer ? Number(payer) : null }, 'Recorded as paid with a personal card.')}
-            >
-              <CreditCard className="size-4" aria-hidden />
-              Paid with a personal card: record it
-            </Button>
-            <p className="w-full text-xs text-slate-500 dark:text-slate-400">For a business purchase on a card the hub doesn't see. It goes in that business's "Paid personally" account, for your CPA to treat as a reimbursement or money you put in.</p>
-          </div>
+          {!isCheck && (
+            <>
+              <Button disabled={busy || r.total === null || !r.date} onClick={() => act(`/api/receipts/${r.id}/cash`, {}, 'Recorded as a cash purchase.')}>
+                <Wallet className="size-4" aria-hidden />
+                Paid in cash: record it
+              </Button>
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+                {entities.length > 1 && (
+                  <Select aria-label="Business this was for" value={payer} onChange={(e) => setPayer(e.target.value)} className="w-auto">
+                    <option value="">Which business?</option>
+                    {entities.map((e) => (
+                      <option key={e.id} value={e.id}>
+                        {e.name}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+                <Button
+                  disabled={busy || r.total === null || !r.date || (entities.length > 1 && !payer)}
+                  onClick={() => act(`/api/receipts/${r.id}/paid-personally`, { entityId: payer ? Number(payer) : null }, 'Recorded as paid with a personal card.')}
+                >
+                  <CreditCard className="size-4" aria-hidden />
+                  Paid with a personal card: record it
+                </Button>
+                <p className="w-full text-xs text-slate-500 dark:text-slate-400">
+                  For a business purchase on a card the hub doesn't see. It goes in that business's "Paid personally" account, for your CPA to treat as a reimbursement or money you put in.
+                </p>
+              </div>
+            </>
+          )}
         </>
       )}
     </Card>

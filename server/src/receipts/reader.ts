@@ -1,4 +1,4 @@
-// Reads a receipt photo or PDF with Claude and returns its details as checked JSON.
+// Reads a receipt or check photo, or a PDF, with Claude and returns its details as checked JSON.
 // Only the receipt itself and the category names are sent; nothing else from the books.
 import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
@@ -7,15 +7,22 @@ import { z } from 'zod';
 export const READER_MODEL = 'claude-opus-5-5';
 
 const ReceiptSchema = z.object({
-  is_receipt: z.boolean().describe('False if the image is not a receipt, invoice or bill.'),
-  vendor: z.string().nullable().describe('The business name, as a person would write it, e.g. "Home Depot".'),
-  date: z.string().nullable().describe('Purchase date as YYYY-MM-DD.'),
+  is_receipt: z.boolean().describe('False if the image is not a receipt, invoice, bill or check.'),
+  document_type: z.enum(['receipt', 'check', 'other']).describe('check for a bank check (cheque); receipt for a receipt, invoice or bill.'),
+  vendor: z.string().nullable().describe('The business name, as a person would write it, e.g. "Home Depot". For a check: who it is paid to ("Pay to the order of").'),
+  date: z.string().nullable().describe('Purchase date as YYYY-MM-DD; for a check, the date written on it.'),
   currency: z.string().nullable().describe('ISO 4217 code, e.g. USD.'),
   subtotal: z.number().nullable(),
   tax: z.number().nullable(),
   tip: z.number().nullable(),
-  total: z.number().nullable().describe('The amount actually paid, including tax and tip.'),
-  card_last4: z.string().nullable().describe('Last four digits of the card used, if printed.'),
+  total: z.number().nullable().describe('The amount actually paid, including tax and tip; for a check, the amount it is written for.'),
+  card_last4: z
+    .string()
+    .nullable()
+    .describe('Last four digits of the card used, if printed. For a check: the last four digits of the account number in the line of numbers along the bottom (not the routing number or the check number).'),
+  check_number: z.string().nullable().describe('For a check: its number, printed at the top right and in the bottom line. Digits only.'),
+  check_payer: z.string().nullable().describe('For a check: the account holder printed at the top left, usually a business name. Not the bank.'),
+  check_memo: z.string().nullable().describe('For a check: what is written on the memo line.'),
   payment_method: z.string().nullable().describe('e.g. "Visa", "Amex", "Cash", "Debit".'),
   category: z.string().nullable().describe('One of the listed categories, or null if none fits.'),
   category_confidence: z
@@ -42,14 +49,15 @@ export interface ReadResult {
   outputTokens: number;
 }
 
-export type ReceiptReader = (file: { data: Buffer; mime: string }, categories: string[]) => Promise<ReadResult>;
+// hint: 'check' when the photo was taken as a check.
+export type ReceiptReader = (file: { data: Buffer; mime: string }, categories: string[], hint?: 'check') => Promise<ReadResult>;
 
-const SYSTEM = `You read receipts for a small business owner's bookkeeping. Copy what the receipt says; never guess a number that isn't printed. Amounts are plain numbers without currency symbols. If a field isn't on the receipt, use null. Line items should follow the receipt's order; leave out lines that are only subtotals, tax or payment.`;
+const SYSTEM = `You read receipts and checks for a small business owner's bookkeeping. Copy what the receipt says; never guess a number that isn't printed. Amounts are plain numbers without currency symbols. If a field isn't on the receipt, use null. Line items should follow the receipt's order; leave out lines that are only subtotals, tax or payment. A check has no line items; when the written and numeric amounts differ, use the written one and say so in the notes.`;
 
 export class ReaderError extends Error {}
 
 export function claudeReader(apiKey: () => string | null): ReceiptReader {
-  return async (file, categories) => {
+  return async (file, categories, hint) => {
     const key = apiKey();
     if (!key) throw new ReaderError('Add an Anthropic API key in Settings to read receipts automatically, or fill in the details yourself.');
     const client = new Anthropic({ apiKey: key, maxRetries: 2, timeout: 120_000 });
@@ -72,7 +80,7 @@ export function claudeReader(apiKey: () => string | null): ReceiptReader {
         messages: [
           {
             role: 'user',
-            content: [block, { type: 'text', text: `Read this receipt. Categories to choose from: ${categories.join('; ')}.` }],
+            content: [block, { type: 'text', text: `${hint === 'check' ? 'Read this check, which the owner wrote. The line of numbers along the bottom is covered on purpose; read the check number from the top right.' : 'Read this receipt.'} Categories to choose from: ${categories.join('; ')}.` }],
           },
         ],
       });
