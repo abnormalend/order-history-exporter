@@ -48,6 +48,8 @@ import { peopleRoutes } from './routes/people';
 import { peopleService } from './people/service';
 import { hoursRoutes } from './routes/hours';
 import { hoursService } from './hours/service';
+import { guestRoutes } from './routes/guests';
+import { guestService } from './stays/guests';
 import { wealthRoutes } from './routes/wealth';
 import { retirementRoutes } from './routes/retirement';
 import { retirementService } from './retirement/service';
@@ -254,6 +256,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   personalRoutes(app, personal);
   peopleRoutes(app, peopleService({ db: db.raw, auth: store }));
   hoursRoutes(app, hoursService({ db: db.raw }));
+  guestRoutes(app, guestService({ db: db.raw }));
   const wealth = wealthService({ db: db.raw, bank });
   wealthRoutes(app, wealth);
   retirementRoutes(app, retirementService({ bank, wealth, personal }));

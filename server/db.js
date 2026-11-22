@@ -8,7 +8,7 @@ const tax = require('./tax');
 
 const RECHECK_DAYS = 60;
 const MAX_DETAIL_ATTEMPTS = 3;
-const SCHEMA_VERSION = 33;
+const SCHEMA_VERSION = 34;
 
 // Links from Amazon's top bar, side cart and footer (its own card ads among them), which
 // a details page read too early can mistake for the items bought.
@@ -665,6 +665,17 @@ const SCHEMA_V32 = `
   CREATE INDEX receipts_kind ON receipts (kind);
 `;
 
+// Guests the owner asked not to contact, and notes about them, by the key the guest
+// list matches them on (email, phone or name).
+const SCHEMA_V34 = `
+  CREATE TABLE guest_contacts (
+    guest_key TEXT PRIMARY KEY,
+    no_contact INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    updated_at TEXT NOT NULL
+  );
+`;
+
 // Material participation hours. Each log is kept for one taxpayer (a married couple
 // counts as one), and holds the people whose hours it adds up. Hours are entered by
 // hand, imported, or worked out from stays (the turnover tasks after each check-out),
@@ -1079,6 +1090,7 @@ function migrate(db, file) {
     if (version < 31) db.exec(SCHEMA_V31);
     if (version < 32) db.exec(SCHEMA_V32);
     if (version < 33) db.exec(SCHEMA_V33);
+    if (version < 34) db.exec(SCHEMA_V34);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
