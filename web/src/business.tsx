@@ -9,7 +9,7 @@ import { cx } from './ui';
 export type Entity = Meta['entities'][number];
 const KEY = 'hub.business';
 
-export const ACTIVITY_LABELS: Record<string, string> = { str: 'Short-term rental', ltr: 'Long-term rental', other: 'Other business' };
+export const ACTIVITY_LABELS: Record<string, string> = { str: 'Short-term rental', ltr: 'Long-term rental', foundation: 'Private foundation', other: 'Other business' };
 export const TAX_FORM_LABELS: Record<string, string> = {
   'form-1065': 'Form 1065, page 1 (partnership trade or business)',
   'form-8825': 'Form 8825 (partnership rental real estate)',

@@ -21,7 +21,7 @@ const MAX_SHIPMENTS = 4;
 const STORES = Object.keys(ORDER_STORE_PAYEES);
 export const ENTITY_KINDS = ['business', 'rental', 'other'] as const;
 // What a business does: a short-term rental (active), a long-term rental (passive), or something else.
-export const ENTITY_ACTIVITIES = ['str', 'ltr', 'other'] as const;
+export const ENTITY_ACTIVITIES = ['str', 'ltr', 'foundation', 'other'] as const;
 // The form its income and expenses go on.
 export const ENTITY_TAX_FORMS = ['form-1065', 'form-8825', 'schedule-c', 'schedule-e'] as const;
 export interface EntityInput {

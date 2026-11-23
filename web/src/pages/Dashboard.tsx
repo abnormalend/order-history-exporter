@@ -11,8 +11,16 @@ import { UnitIncomeCard } from '../unitIncome';
 import type { Account, SimplefinStatus } from '../bank';
 import { money, whole } from '../format';
 import { Banner, Card, Empty, Loading, PageHeader, Stat, TD, TH, TR } from '../ui';
+import { FoundationDashboard } from './Foundation';
 
+// A foundation gets its own dashboard: growth, grants and a five-year calendar.
 export function Dashboard({ meta }: { meta: Meta | null }) {
+  const { current } = useBusiness();
+  if (current?.activity === 'foundation') return <FoundationDashboard key={current.id} entity={current} />;
+  return <SpendingDashboard meta={meta} />;
+}
+
+function SpendingDashboard({ meta }: { meta: Meta | null }) {
   const { business, current } = useBusiness();
   const { query, params, range } = useFilters();
   const navigate = useNavigate();

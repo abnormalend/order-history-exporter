@@ -50,6 +50,8 @@ import { hoursRoutes } from './routes/hours';
 import { hoursService } from './hours/service';
 import { guestRoutes } from './routes/guests';
 import { guestService } from './stays/guests';
+import { foundationRoutes } from './routes/foundation';
+import { foundationService } from './foundation/service';
 import { wealthRoutes } from './routes/wealth';
 import { retirementRoutes } from './routes/retirement';
 import { retirementService } from './retirement/service';
@@ -257,6 +259,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   peopleRoutes(app, peopleService({ db: db.raw, auth: store }));
   hoursRoutes(app, hoursService({ db: db.raw }));
   guestRoutes(app, guestService({ db: db.raw }));
+  foundationRoutes(app, foundationService({ db: db.raw }), (id) => Boolean(db.raw.prepare('SELECT 1 FROM entities WHERE id = ?').get(id)));
   const wealth = wealthService({ db: db.raw, bank });
   wealthRoutes(app, wealth);
   retirementRoutes(app, retirementService({ bank, wealth, personal }));

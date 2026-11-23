@@ -231,9 +231,10 @@ function ExtensionCard() {
 const TYPES: { value: string; label: string; kind: string; taxForm: string }[] = [
   { value: 'str', label: 'Short-term rental (active)', kind: 'business', taxForm: 'form-1065' },
   { value: 'ltr', label: 'Long-term rental (passive)', kind: 'rental', taxForm: 'form-8825' },
+  { value: 'foundation', label: 'Private foundation', kind: 'other', taxForm: 'schedule-c' },
   { value: 'other', label: 'Other business', kind: 'business', taxForm: 'schedule-c' },
 ];
-const typeOf = (en: Meta['entities'][number]) => (en.activity === 'str' || en.activity === 'ltr' ? en.activity : 'other');
+const typeOf = (en: Meta['entities'][number]) => (en.activity === 'str' || en.activity === 'ltr' || en.activity === 'foundation' ? en.activity : 'other');
 
 function EntitiesCard({ entities, onChange }: { entities: Meta['entities']; onChange: () => void }) {
   const [name, setName] = useState('');
