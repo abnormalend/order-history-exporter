@@ -1,7 +1,31 @@
 // The app frame: a sidebar on wide screens, a tab bar along the bottom on phones.
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { NavLink } from 'react-router-dom';
-import { ArrowLeftRight, BedDouble, ChartLine, Clock, FileCheck2, KeyRound, FileSpreadsheet, Inbox, Landmark, LayoutDashboard, LogOut, Menu, Package, Receipt, ScrollText, Settings, Sunset, Tags, TrendingUp, Upload, Users, Wallet } from 'lucide-react';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import {
+  ArrowLeftRight,
+  BedDouble,
+  ChartLine,
+  Clock,
+  FileCheck2,
+  KeyRound,
+  FileSpreadsheet,
+  Inbox,
+  Landmark,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Package,
+  Receipt,
+  ScrollText,
+  Settings,
+  Sunset,
+  Tags,
+  TrendingUp,
+  Upload,
+  Users,
+  Wallet,
+} from 'lucide-react';
 import { BusinessPicker, useBusiness } from './business';
 import { ExpiryWarning } from './rentroll';
 import { LoanPaymentPrompt } from './loans';
@@ -14,8 +38,8 @@ export const NAV = [
   { to: '/profit-loss', label: 'Profit & loss', icon: TrendingUp },
   { to: '/stays', label: 'Stays', icon: BedDouble, strOnly: true },
   { to: '/guests', label: 'Guests', icon: Users, strOnly: true },
-  { to: '/leases', label: 'Leases', icon: KeyRound },
-  { to: '/hours', label: 'Hours', icon: Clock },
+  { to: '/leases', label: 'Leases', icon: KeyRound, notFoundation: true },
+  { to: '/hours', label: 'Hours', icon: Clock, strOnly: true, strChosen: true },
   { to: '/personal', label: 'My money', icon: Wallet, divider: true },
   { to: '/wealth', label: 'Wealth', icon: ChartLine },
   { to: '/retirement', label: 'Retirement', icon: Sunset },
@@ -31,12 +55,37 @@ export const NAV = [
   { to: '/year-end', label: 'Year end', icon: FileCheck2 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
-type NavEntry = { to: string; label: string; icon: typeof Menu; end?: boolean; phone?: boolean; strOnly?: boolean; divider?: boolean };
+type NavEntry = { to: string; label: string; icon: typeof Menu; end?: boolean; phone?: boolean; strOnly?: boolean; strChosen?: boolean; notFoundation?: boolean; divider?: boolean };
 
-// The pages for the business chosen: Stays only for a short-term rental (or all of them).
+// The pages for the business chosen: Stays and Guests for a short-term rental (or all of
+// them), Hours only once a short-term rental is chosen, and no Leases for a foundation.
+const shows = (n: NavEntry, current: ReturnType<typeof useBusiness>['current']) => {
+  const str = current?.activity === 'str';
+  if (n.strChosen) return str;
+  if (n.strOnly && current && !str) return false;
+  if (n.notFoundation && current?.activity === 'foundation') return false;
+  return true;
+};
 export function useNav(): NavEntry[] {
   const { current } = useBusiness();
-  return (NAV as NavEntry[]).filter((n) => !n.strOnly || !current || current.activity === 'str');
+  return (NAV as NavEntry[]).filter((n) => shows(n, current));
+}
+
+// Switching business: a foundation opens on its dashboard, and a page the new choice
+// doesn't have goes back to the dashboard too.
+function useBusinessSwitch() {
+  const { business, current, entities } = useBusiness();
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  // Undefined until the businesses have loaded, so opening the app isn't taken as a switch.
+  const previous = useRef<number | null | undefined>(undefined);
+  useEffect(() => {
+    if (!entities.length) return;
+    const switched = previous.current !== undefined && previous.current !== business;
+    previous.current = business;
+    const hidden = (NAV as NavEntry[]).some((n) => n.to !== '/' && (pathname === n.to || pathname.startsWith(n.to + '/')) && !shows(n, current));
+    if ((switched && current?.activity === 'foundation' && pathname !== '/') || hidden) navigate('/', { replace: !switched });
+  }, [business, current, entities, pathname, navigate]);
 }
 
 // On phones, the pages without a tab of their own are under More.
@@ -50,6 +99,7 @@ const MEMBER_NAV: NavEntry[] = [
 
 export function Layout({ username, member = false, onSignOut, children }: { username: string; member?: boolean; onSignOut: () => void; children: ReactNode }) {
   const businessNav = useNav();
+  useBusinessSwitch();
   const nav = member ? MEMBER_NAV : businessNav;
   const phoneNav = member ? MEMBER_NAV : PHONE_NAV;
   return (
@@ -111,13 +161,19 @@ export function Layout({ username, member = false, onSignOut, children }: { user
         </main>
       </div>
 
-      <nav aria-label="Main" className="safe-bottom fixed inset-x-0 bottom-0 z-20 grid border-t border-slate-200 bg-white md:hidden dark:border-slate-800 dark:bg-slate-900" style={{ gridTemplateColumns: `repeat(${phoneNav.length}, minmax(0, 1fr))` }}>
+      <nav
+        aria-label="Main"
+        className="safe-bottom fixed inset-x-0 bottom-0 z-20 grid border-t border-slate-200 bg-white md:hidden dark:border-slate-800 dark:bg-slate-900"
+        style={{ gridTemplateColumns: `repeat(${phoneNav.length}, minmax(0, 1fr))` }}
+      >
         {phoneNav.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
             to={to}
             end={end}
-            className={({ isActive }) => cx('flex flex-col items-center gap-0.5 pt-2 text-[11px] font-medium', isActive ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')}
+            className={({ isActive }) =>
+              cx('flex flex-col items-center gap-0.5 pt-2 text-[11px] font-medium', isActive ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+            }
           >
             <Icon className="size-5" aria-hidden />
             {phoneNav.length <= 3 ? label : label.split(' ')[0]}
