@@ -414,3 +414,24 @@ test('a check: its business from the name printed on it, linked by its number wh
   await assert.rejects(post(`/api/receipts/${stray.id}`, { entityId: 99999 }), /business was not found/);
   assert.equal((await call('/api/receipts?kind=cheque')).status, 400);
 });
+
+// Anthropic refuses a structured-output schema with more than 16 fields that can be
+// null (type arrays or anyOf), so the one actually sent must stay under that.
+test('the reader asks for at most 16 fields that can be null', () => {
+  const { WireSchema, fromWire } = require('../server/dist/receipts/reader');
+  const { betaZodOutputFormat } = require('@anthropic-ai/sdk/helpers/beta/zod');
+  const schema = betaZodOutputFormat(WireSchema).schema;
+  let unions = 0;
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node.type) || node.anyOf || node.oneOf) unions++;
+    for (const value of Object.values(node)) walk(value);
+  };
+  walk(schema);
+  assert.ok(unions <= 16, `${unions} fields can be null`);
+  const reading = fromWire({ ...Object.fromEntries(Object.keys(WireSchema.shape).map((k) => [k, null])), currency: 'USD', check_payer: '', check_memo: ' ', payment_method: 'Visa', notes: '', items: [] });
+  assert.equal(reading.currency, 'USD');
+  assert.equal(reading.check_payer, null);
+  assert.equal(reading.check_memo, null);
+  assert.equal(reading.notes, null);
+});

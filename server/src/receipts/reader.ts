@@ -42,6 +42,19 @@ const ReceiptSchema = z.object({
 
 export type ReceiptReading = z.infer<typeof ReceiptSchema>;
 
+// What the model fills in. Anthropic allows at most 16 fields that can be null, so a
+// few text fields come back as "" instead and are turned into null afterwards.
+const TEXT_OR_BLANK = ['currency', 'check_payer', 'check_memo', 'payment_method', 'notes'] as const;
+const blankable = (field: (typeof TEXT_OR_BLANK)[number]) =>
+  z.string().describe(`${ReceiptSchema.shape[field].description || ''} Empty string if not shown.`.trim());
+export const WireSchema = ReceiptSchema.extend(Object.fromEntries(TEXT_OR_BLANK.map((f) => [f, blankable(f)])) as { [K in (typeof TEXT_OR_BLANK)[number]]: z.ZodString });
+
+export function fromWire(wire: z.infer<typeof WireSchema>): ReceiptReading {
+  const reading: ReceiptReading = { ...wire };
+  for (const f of TEXT_OR_BLANK) reading[f] = wire[f].trim() || null;
+  return reading;
+}
+
 export interface ReadResult {
   reading: ReceiptReading;
   model: string;
@@ -75,7 +88,7 @@ export function claudeReader(apiKey: () => string | null): ReceiptReader {
         // If the model declines, the request is retried on its default fallback model.
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
-        output_config: { effort: 'medium', format: betaZodOutputFormat(ReceiptSchema) },
+        output_config: { effort: 'medium', format: betaZodOutputFormat(WireSchema) },
         system: SYSTEM,
         messages: [
           {
@@ -94,10 +107,10 @@ export function claudeReader(apiKey: () => string | null): ReceiptReader {
     }
     if (response.stop_reason === 'refusal') throw new ReaderError('The receipt could not be read automatically. Fill in the details yourself.');
     if (response.stop_reason === 'max_tokens') throw new ReaderError('The receipt was too long to read in one go. Fill in the details yourself.');
-    const reading = response.parsed_output;
-    if (!reading) throw new ReaderError('The reply could not be understood. Try reading it again.');
+    const wire = response.parsed_output;
+    if (!wire) throw new ReaderError('The reply could not be understood. Try reading it again.');
     return {
-      reading,
+      reading: fromWire(wire),
       model: response.model,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
