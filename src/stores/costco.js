@@ -7,8 +7,8 @@
 // Read from the page's own ids and automation-id attributes, which Costco's tests rely
 // on, rather than from its generated class names.
 //
-// Not seen on the one account this was written against, so unverified: fuel receipts,
-// a warehouse period with no receipts, and costco.com orders with several shipments.
+// Not seen on the one account this was written against, so unverified: a warehouse
+// period with no receipts, and costco.com orders with several shipments.
 (function (root) {
   const OHE = root.OHE;
   const { text, summary, rowFor, absolute } = OHE.dom;
@@ -47,43 +47,59 @@
     };
   }
 
+  // Each choice in the list, known by the month it starts in ("2026-06") rather than by
+  // its wording, which is a placeholder for a moment while the page loads. A choice with
+  // no dates in its name, "Last 3 Months", is 'recent'.
+  const RECENT = 'recent';
   function periods(select) {
-    const all = [...select.options].map((option) => ({ label: option.text.trim(), dates: periodOf(option.text.trim()) }));
+    const all = [...select.options].map((option, index) => {
+      const dates = periodOf(option.text.trim());
+      return { index, dates, key: dates ? dates.from.slice(0, 7) : RECENT };
+    });
     const newest = all.reduce((latest, p) => (p.dates && p.dates.to > latest ? p.dates.to : latest), '');
     return { all, newest };
   }
 
-  // The periods a date range needs, newest first. "Last 3 Months" has no dates in its
-  // name, so it's read whenever the range reaches past the newest period that has.
+  // The periods a date range needs, newest first. The recent one is read whenever the
+  // range reaches past the newest period that has dates.
   function periodsFor(select, range) {
     const { all, newest } = periods(select);
-    return all
+    const keys = all
       .filter((p) =>
         p.dates
           ? (!range.to || p.dates.from <= range.to) && (!range.from || p.dates.to >= range.from)
           : !range.to || !newest || range.to > newest
       )
-      .map((p) => p.label);
+      .map((p) => p.key);
+    return [...new Set(keys)];
   }
 
   // The period an order of this date is listed under, or null if the list doesn't reach it.
   function periodForDate(select, date) {
     const { all, newest } = periods(select);
     const named = date && all.find((p) => p.dates && date >= p.dates.from && date <= p.dates.to);
-    if (named) return named.label;
-    const recent = all.find((p) => !p.dates);
-    return recent && (!date || !newest || date > newest) ? recent.label : null;
+    if (named) return named.key;
+    return all.some((p) => !p.dates) && (!date || !newest || date > newest) ? RECENT : null;
+  }
+
+  const chosenPeriod = (select) => (periods(select).all[select.selectedIndex] || {}).key;
+
+  function setPeriod(select, key) {
+    const period = periods(select).all.find((p) => p.key === key);
+    if (!period) return false;
+    select.selectedIndex = period.index;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
   }
 
   const listSignature = (doc) =>
     [...doc.querySelectorAll(`${RECEIPT_CARD}, ${ONLINE_LINK}`)].map((el) => el.id).join('|');
 
-  function setPeriod(select, label) {
-    const index = [...select.options].findIndex((option) => option.text.trim() === label);
-    if (index < 0) return false;
-    select.selectedIndex = index;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
+  // True once the open tab shows its orders, or says it has none.
+  function listArrived(doc) {
+    if (listSignature(doc)) return true;
+    const panel = doc.querySelector('[role="tabpanel"]:not([hidden])');
+    return /\bno \w+ are available\b/i.test(text(panel));
   }
 
   /* ---------- The list ---------- */
@@ -227,7 +243,44 @@
     return out;
   }
 
-  const receiptShowing = (doc, orderId) => [...doc.querySelectorAll('#dataToPrint')].find((el) => text(el).includes(orderId));
+  // A fuel receipt has no table. It reads as labels and values in order: "Pump",
+  // "Gallons", "Price", then their values; "Product", "Amount", then the fuel and what it
+  // cost; "Total Sale"; and the card as a two-letter code before "Acct #".
+  const CARD_CODES = { VI: 'Visa', MC: 'Mastercard', AX: 'American Express', DS: 'Discover', DB: 'Debit card' };
+  function readFuelReceipt(receipt) {
+    const leaves = [...receipt.querySelectorAll('*')].filter((el) => !el.children.length).map(text).filter(Boolean);
+    const after = (label) => {
+      const at = leaves.findIndex((leaf) => label.test(leaf));
+      return at >= 0 ? leaves.slice(at + 1) : [];
+    };
+    const number = (value) => Number(String(value).replace(/[$,]/g, ''));
+    const gallons = after(/^gallons$/i).find((leaf) => /^[\d,]+\.\d{3}$/.test(leaf));
+    const perGallon = after(/^price$/i).find((leaf) => /^\$\s*\d+\.\d{2,3}$/.test(leaf));
+    const [product, amount] = after(/^amount$/i);
+    const total = OHE.parseMoney(after(/^total sale$/i)[0]) || OHE.parseMoney(amount);
+    const out = { items: [] };
+    if (total) {
+      out.total = total.amount;
+      out.currency = 'USD';
+    }
+    if (product && !/^\$/.test(product) && total) {
+      const item = { name: `${product} fuel`, lineTotal: (OHE.parseMoney(amount) || total).amount };
+      if (gallons) item.quantity = number(gallons);
+      if (perGallon) item.price = number(perGallon);
+      out.items.push(item);
+    }
+    const account = leaves.findIndex((leaf) => /^[A-Z]{2}\s+Acct\s*#$/i.test(leaf));
+    const digits = account >= 0 ? (leaves[account + 1] || '').match(/^[*X\s]+(\d{4})$/i) : null;
+    if (digits) out.payment = `${CARD_CODES[leaves[account].slice(0, 2).toUpperCase()] || 'Card'} ending ${digits[1]}`;
+    return out;
+  }
+
+  // The receipt in the popup, if it is this order's. A warehouse receipt prints its
+  // number. A fuel receipt doesn't, so openDetail also notes which one it opened.
+  function receiptShowing(doc, orderId) {
+    const opened = doc.documentElement.getAttribute('data-ohe-opened') === orderId;
+    return [...doc.querySelectorAll('#dataToPrint')].find((el) => text(el) && (opened || text(el).includes(orderId)));
+  }
 
   /* ---------- A costco.com order ---------- */
 
@@ -278,10 +331,16 @@
     };
 
     const otherReceipt = auto(doc, 'closePopup');
-    if (otherReceipt) return step(otherReceipt);
+    if (otherReceipt) {
+      html.removeAttribute('data-ohe-opened');
+      return step(otherReceipt);
+    }
     const card = doc.getElementById(`${receipt ? 'viewRecieptBtn' : 'orderNumber'}_${order.orderId}`);
     const opener = card && receipt ? card.querySelector('button') : card;
-    if (opener) return step(opener);
+    if (opener) {
+      if (receipt) html.setAttribute('data-ohe-opened', order.orderId);
+      return step(opener);
+    }
 
     const tab = auto(doc, TABS[receipt ? 'warehouse' : 'online']);
     if (!tab) return false; // still loading
@@ -290,7 +349,7 @@
     if (!select) return false;
     const period = periodForDate(select, order.date);
     if (!period) return false; // older than the list goes back
-    if (select.options[select.selectedIndex].text.trim() !== period) {
+    if (chosenPeriod(select) !== period) {
       html.setAttribute('data-ohe-step', String(Date.now()));
       setPeriod(select, period);
       return false;
@@ -317,7 +376,7 @@
       return null;
     },
 
-    // "warehouse|2026 June - August": a tab and one of its periods.
+    // "warehouse|2026-06": a tab, and the period starting that month.
     views: {
       list(doc, ctx) {
         const select = doc.getElementById('Showing');
@@ -334,15 +393,17 @@
           tab.click();
           if (!(await OHE.waitFor(() => tab.getAttribute('aria-selected') === 'true', 8000))) return false;
         }
-        // The tab's first list, for the newest period, arrives before the period is changed.
+        // The tab's first list, for the recent period, arrives before the period is changed.
         const select = await OHE.waitFor(() => doc.getElementById('Showing'), 8000);
         if (!select) return false;
-        await pause(1500);
-        if (select.options[select.selectedIndex].text.trim() === period) return true;
+        await OHE.waitFor(() => listArrived(doc), 10000);
+        await pause(500);
+        if (chosenPeriod(select) === period) return true;
         const before = listSignature(doc);
         if (!setPeriod(select, period)) return false;
-        // Two periods can list nothing at all, so there may be no change to wait for.
-        await OHE.waitFor(() => listSignature(doc) !== before, 4000);
+        // Two periods running can both list nothing, so there may be no change to see.
+        await pause(800);
+        await OHE.waitFor(() => listArrived(doc) && (!listSignature(doc) || listSignature(doc) !== before), 6000);
         await pause(500);
         return true;
       },
@@ -359,7 +420,8 @@
     extractDetail(doc, order) {
       if (!isReceipt(order.orderId)) return onlineShowing(doc, order.orderId) ? readOnlineOrder(doc) : null;
       const receipt = receiptShowing(doc, order.orderId);
-      return receipt ? readReceipt(receipt) : null;
+      if (!receipt) return null;
+      return receipt.querySelector('table tr') ? readReceipt(receipt) : readFuelReceipt(receipt);
     },
   });
 })(globalThis);

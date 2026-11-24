@@ -300,7 +300,7 @@ Excel drops leading zeros when it opens a CSV directly, so `02134` displays as `
 - Newegg's details page covers a whole checkout. For a checkout with several orders, tax, shipping and item prices aren't split per order, so those stay blank and the order's total comes from the list.
 - Target's In-store tab only lists purchases Target tied to your account, by your Target Circle card or the phone number or barcode you gave at the register. Others never appear there.
 - Costco lists purchases three months at a time, back about three years, so a first run opens the page once for each period. A warehouse receipt opens in a popup on that page, so each one is found on the list again before it's read.
-- Costco receipts print short names such as `KS BACON`. Money off an item is taken out of that item's price, so a receipt's items add up to its subtotal. Fuel receipts haven't been checked.
+- Costco receipts print short names such as `KS BACON`. Money off an item is taken out of that item's price, so a receipt's items add up to its subtotal. A fuel receipt is one item, with the gallons as its quantity and the price a gallon.
 - Orders with no readable date are left out of date-limited exports, and the results page tells you how many.
 
 ## When a store stops working

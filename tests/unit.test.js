@@ -720,19 +720,54 @@ test('costco refund receipt: negative amounts, and the card by its last digits o
   assert.equal(patch.payment, 'Card ending 1234');
 });
 
+test('costco fuel receipt: gallons, price a gallon and the card, though it shows no receipt number', async () => {
+  const id = '21099908100012607151826';
+  const win = load(fixture('costco-warehouse'), COSTCO_URL);
+  const doc = win.document;
+  doc.getElementById('receipt-popup').remove();
+  const card = doc.querySelector('[id^="viewRecieptBtn_"]');
+  card.id = `viewRecieptBtn_${id}`;
+  card.querySelector('[automation-id="In-Warehouse"] div').firstChild.nodeValue = 'Gas Station';
+  const { orders } = plain(win.OHE.stores.costco.extractList(doc, { today: '2026-11-24', range: {} }));
+  assert.equal(orders[0].status, 'Gas Station, ANYTOWN');
+  card.querySelector('button').addEventListener('click', () => {
+    doc.body.insertAdjacentHTML(
+      'beforeend',
+      `<div role="dialog"><h2 id="alert-dialog-title">Gas Station Receipt</h2><div id="dataToPrint"><div>
+        <div><img alt="Costco Wholesale"><div>Anytown # 999</div><div>100 TEST ST SE</div><div>ANYTOWN , MI 49000</div></div>
+        <div><div>Member</div><div>111000000000</div><div>Invoice #</div><div>10001</div><div>Date :</div><div>07/15/26</div><div>Time :</div><div>18:26</div><div>Auth #</div><div>00000A</div></div>
+        <div><div>VI Acct #</div><div>************ 1234</div></div>
+        <div><div>Pump</div><div>Gallons</div><div>Price</div><div>8</div><div>23.120</div><div>$3.829</div></div>
+        <div><div>Product</div><div>Amount</div><div>Regular</div><div>$88.53</div><div>Total Sale</div><div>$88.53</div></div>
+        <div><div>Sale - Contactless</div><div>Approved</div><div>TranID # 000000000001</div></div>
+      </div></div><button automation-id="closePopup" type="button">Close</button></div>`
+    );
+  });
+  const result = await win.OHE.run({ storeId: 'costco', mode: 'detail', order: { orderId: id, date: '2026-11-20' }, today: '2026-11-24' });
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(plain(result.patch), {
+    items: [{ name: 'Regular fuel', lineTotal: 88.53, quantity: 23.12, price: 3.829 }],
+    total: 88.53,
+    currency: 'USD',
+    payment: 'Visa ending 1234',
+  });
+  // It counts for the receipt that was opened, and no other.
+  assert.equal(win.OHE.stores.costco.extractDetail(doc, { orderId: '21099900200222611051815' }), null);
+});
+
 test('costco views: each tab with the periods the range needs', () => {
   const win = load(fixture('costco-warehouse'), COSTCO_URL);
   const views = (range) => plain(win.OHE.stores.costco.views.list(win.document, { today: '2026-11-24', range }));
-  assert.deepEqual(views({ from: '2026-10-01', to: '2026-11-24' }), ['warehouse|Last 3 Months', 'online|Last 3 Months']);
+  assert.deepEqual(views({ from: '2026-10-01', to: '2026-11-24' }), ['warehouse|recent', 'online|recent']);
   // A period crossing the new year is named for the year it ends in.
-  assert.deepEqual(views({ from: '2025-12-15', to: '2025-12-31' }), ['warehouse|2026 December - February', 'online|2026 December - February']);
-  assert.deepEqual(views({ from: '2026-05-20', to: '2026-06-10' }), [
-    'warehouse|2026 June - August',
-    'warehouse|2026 March - May',
-    'online|2026 June - August',
-    'online|2026 March - May',
-  ]);
+  assert.deepEqual(views({ from: '2025-12-15', to: '2025-12-31' }), ['warehouse|2025-12', 'online|2025-12']);
+  assert.deepEqual(views({ from: '2026-05-20', to: '2026-06-10' }), ['warehouse|2026-06', 'warehouse|2026-03', 'online|2026-06', 'online|2026-03']);
   assert.equal(views({ from: null, to: null }).length, 10);
+  // While the page loads, the choices are briefly placeholders. The views don't depend on the wording.
+  const select = win.document.getElementById('Showing');
+  select.options[0].text = 'lastNMonths';
+  select.options[1].text = '2026 june - august';
+  assert.deepEqual(views({ from: '2026-08-01', to: '2026-11-24' }), ['warehouse|recent', 'warehouse|2026-06', 'online|recent', 'online|2026-06']);
   assert.equal(load().OHE.stores.costco.views.list(load().document, { range: {} }), null);
 });
 
@@ -741,10 +776,14 @@ test('costco applies a view by choosing the tab, then the period', async () => {
   const select = win.document.getElementById('Showing');
   let changes = 0;
   select.addEventListener('change', () => changes++);
-  assert.equal(await win.OHE.stores.costco.views.apply(win.document, 'warehouse|2026 March - May'), true);
+  assert.equal(await win.OHE.stores.costco.views.apply(win.document, 'warehouse|recent'), true);
+  assert.equal(changes, 0, 'already showing the recent period');
+  // The new period's list arrives a moment after it's chosen.
+  select.addEventListener('change', () => setTimeout(() => win.document.querySelector('[id^="viewRecieptBtn_"]').remove(), 100));
+  assert.equal(await win.OHE.stores.costco.views.apply(win.document, 'warehouse|2026-03'), true);
   assert.equal(select.value, '2026 March - May');
   assert.equal(changes, 1);
-  assert.equal(await win.OHE.stores.costco.views.apply(win.document, 'warehouse|2019 March - May'), false);
+  assert.equal(await win.OHE.stores.costco.views.apply(win.document, 'warehouse|2019-03'), false);
 });
 
 test('costco opens a receipt in place: its tab, its period, then View Receipt', async () => {
