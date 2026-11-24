@@ -590,7 +590,10 @@ test('target online list: orders by link, packages, picture names, no buy-again 
   assert.equal(orders[0].status, 'Picked up, Drive Up at Anytown East');
   assert.deepEqual(orders[0].items, [{ name: '17" Test Rope Bin Gray - Testroom™', quantity: 2 }, { name: 'Test Thank You Notes 24ct - up&up™' }]);
   assert.equal(orders[1].detailUrl, 'https://www.target.com/orders/912000000000002');
-  assert.equal(orders[1].status, 'Picked up, Drive Up at Anytown South; Delivered Thu, Aug 27');
+  assert.equal(orders[1].status, 'Picked up, Drive Up at Anytown South; Delivered Thu, Aug 27; Canceled, Wed, Aug 26');
+  // A cancelled package's items aren't listed, here or on the order's page.
+  assert.deepEqual(orders[1].items.map((i) => i.name), ['Test Step Trash Can 46L', 'Test Freezer Bags 30ct']);
+  assert.deepEqual(orders[2].items, []);
   assert.equal(orders[2].total, 0);
   assert.equal(orders[2].status, 'Canceled on Wed, May 6');
 });

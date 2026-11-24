@@ -37,9 +37,15 @@
   }
 
   // The list shows each item only as a picture, described as "Name - quantity: 2".
+  // A cancelled package's pictures are left out, as its items are on the order's page.
+  // Otherwise the list would name more items than that page, and the fuller list is kept.
   function listItems(card) {
     const pictures = card.querySelectorAll('[id="item-picture-container"] img[alt]');
     return [...(pictures.length ? pictures : card.querySelectorAll('img[alt]'))]
+      .filter((img) => {
+        const pack = img.closest('[data-test="order-history-v2-package-card"]');
+        return !pack || !/^cancell?ed\b/i.test(text(pack.querySelector('h4')));
+      })
       .map((img) => {
         const alt = decode(img.getAttribute('alt')).trim();
         const quantity = alt.match(/\s+-\s+quantity:\s*(\d+)$/i);
