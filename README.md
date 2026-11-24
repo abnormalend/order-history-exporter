@@ -14,7 +14,7 @@ A free, open-source way to keep your business income and expenses on your own se
 | Sam's Club | Same parser as Walmart | Yes, on one account |
 | Newegg | Order list (using its year dropdown) and order detail pages | Yes, on one account |
 | Home Depot | Purchase history table and order detail pages | Yes, on one Pro Xtra account |
-| Target | Purchase history, Online and In-store tabs, and each purchase's page | Page layout checked on one account; not yet run end to end |
+| Target | Purchase history, Online and In-store tabs, and each purchase's page | Yes, on one account |
 | Costco | Orders and Purchases, Warehouse and Online tabs, and each warehouse receipt | Page layout checked on one account; not yet run end to end |
 
 > **Status: early version.** Each store has been run on one real account, and the automated tests use made-up sample pages. Syncing to the database, with categories and tax groups, has been tested live with Sam's Club so far. Stores change their pages often, and other accounts may see layouts this one didn't. If a store fails, the extension tells you, and you can [report it](#when-a-store-stops-working).
