@@ -98,8 +98,17 @@
     return { orders };
   }
 
+  // An order can be picked up in part and cancelled in part. Each package has a heading
+  // above its items, and a cancelled package's items weren't bought: the order's
+  // subtotal leaves them out, so they are left out here too.
+  function cancelled(heading, packages) {
+    const own = packages.filter((p) => p.compareDocumentPosition(heading) & 4 /* heading follows it */).pop();
+    return Boolean(own) && /^cancell?ed\b/i.test(text(own));
+  }
+
   function readItems(doc) {
-    const headings = [...doc.querySelectorAll('h3[id^="item-"]')];
+    const packages = [...doc.querySelectorAll('[data-test="package-card-heading"]')];
+    const headings = [...doc.querySelectorAll('h3[id^="item-"]')].filter((heading) => !cancelled(heading, packages));
     return headings.map((heading) => {
       const row = rowFor(heading, (el) => headings.some((other) => other !== heading && el.contains(other)));
       // "$10.00 unit price", "$2.99 each" or "$4.00": always the price of one.

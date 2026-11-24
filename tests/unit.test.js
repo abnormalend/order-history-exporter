@@ -631,7 +631,7 @@ test('target views: both tabs, and switching waits for the other tab to be chose
   assert.equal(load().OHE.stores.target.views.list(load().document, {}), null);
 });
 
-test('target detail: unit prices in each wording, money rows, free fulfillment, card, address', () => {
+test('target detail: unit prices in each wording, no cancelled items, money rows, free fulfillment, card, address', () => {
   const win = load(fixture('target-detail'), 'https://www.target.com/orders/912000000000002');
   const patch = plain(win.OHE.stores.target.extractDetail(win.document));
   assert.deepEqual(patch.items, [
@@ -639,6 +639,8 @@ test('target detail: unit prices in each wording, money rows, free fulfillment, 
     { name: 'Test Gummy Candy', quantity: 2, price: 2.99 },
     { name: '46L Test Step Trash Can', quantity: 1, price: 35 },
   ]);
+  // The cancelled clipper isn't among them, so the items add up to the subtotal.
+  assert.equal(Math.round(patch.items.reduce((sum, item) => sum + item.price * item.quantity, 0) * 100) / 100, 50.98);
   assert.equal(patch.total, 50.69);
   assert.equal(patch.subtotal, 50.98);
   assert.equal(patch.tax, 2.26);
